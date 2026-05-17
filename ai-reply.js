@@ -761,7 +761,15 @@ const FB_MVP_GUARDRAILS = `
 ---
 `;
 
-// ─── Stage 2.2: Sanitize bot output (remove leaked internal markers) ────────
+// ─── Stage 2.3: Escalate message สำหรับ reject mode ─────────────────────────
+const AVAILABILITY_ESCALATE_TH =
+  "ขอเจ้าหน้าที่ช่วยเช็คห้องว่างให้นะครับ 🙏 รอสักครู่ครับ\nระหว่างนี้ถ้ามีคำถามอื่นๆ เกี่ยวกับเกาะทะลุ ทักมาได้เลยครับ 😊";
+const AVAILABILITY_ESCALATE_EN =
+  "Let me get our admin to check room availability for you 🙏\nFeel free to ask about anything else in the meantime 😊";
+
+// ─── Stage 2.2/2.3: Sanitize bot output ─────────────────────────────────────
+// (1) strip internal reasoning markers (Stage 2.2)
+// (2) REJECT entire reply ถ้ามี hard availability assertion (Stage 2.3 NEW)
 function sanitizeReply(text) {
   if (!text) return text;
   let cleaned = text;
@@ -779,6 +787,49 @@ function sanitizeReply(text) {
   cleaned = cleaned.replace(/^[ \t]*ลูกค้าบอก[^\n]*·[^\n]*·[^\n]*\n?/gm, "");
   // ลบ blank lines ที่ตามมาเป็นชุด (>2 บรรทัดเปล่า → 1)
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+
+  // ─── Stage 2.3: REJECT MODE — availability hallucination ────────────────
+  // ถ้าบอท assertive ว่ามี/ไม่มี/ห้องว่างกี่ห้อง → reject ทั้งข้อความ + replace escalate
+  // CRITICAL: ห้าม assert ว่าเช็คเอง (NEVER rule จาก CLAUDE.md)
+  const hardAvailabilityClaims = [
+    /✅[ \t]*ห้องว่าง/i,                  // "✅ ห้องว่าง" — bot affirming
+    /❌[ \t]*ห้องเต็ม/i,                  // "❌ ห้องเต็ม" — bot denying
+    /ห้องเต็มครับ/i,                       // "ห้องเต็มครับ"
+    /ห้องเต็มหมด/i,                        // "ห้องเต็มหมดแล้ว"
+    /ไม่มีห้องว่าง/i,                      // "ไม่มีห้องว่าง"
+    /ห้องว่างอยู่[ \t]*\d/i,               // "ห้องว่างอยู่ 3 ห้อง"
+    /\bfully booked\b/i,                  // EN
+    /\bno rooms available\b/i,            // EN
+    /\brooms? (?:is|are) available\b/i,   // EN: "room is available"
+  ];
+
+  // Self-check pattern: บอท claim ว่าจะเช็ค WITHOUT delegate ให้แอดมิน/เจ้าหน้าที่
+  const hasBotSelfCheck =
+    /ขอเช็คห้องว่าง/i.test(cleaned) &&
+    !/(?:เจ้าหน้าที่|แอดมิน|admin|staff|team)[\s\S]{0,30}?(?:เช็ค|check|ตรวจสอบ)/i.test(
+      cleaned
+    );
+
+  let rejected = false;
+  let matchedPattern = null;
+  for (const pattern of hardAvailabilityClaims) {
+    if (pattern.test(cleaned)) {
+      rejected = true;
+      matchedPattern = String(pattern);
+      break;
+    }
+  }
+  if (!rejected && hasBotSelfCheck) {
+    rejected = true;
+    matchedPattern = "bot-self-check (no admin delegate)";
+  }
+
+  if (rejected) {
+    console.warn(`[AI] 🛡️ Reject reply — matched availability hallucination: ${matchedPattern}`);
+    const isEN = /[a-zA-Z]/.test(text) && !/[ก-๙]/.test(text.slice(0, 50));
+    return isEN ? AVAILABILITY_ESCALATE_EN : AVAILABILITY_ESCALATE_TH;
+  }
+
   return cleaned;
 }
 

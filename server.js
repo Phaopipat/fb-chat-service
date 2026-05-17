@@ -172,7 +172,7 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.2.2",
+    version: "1.2.3",
     bot_enabled: BOT_ENABLED,
     echo_allowlist_count: ECHO_ENABLED_PSIDS.length,
     anthropic_api_key: ANTHROPIC_API_KEY ? "✅ set" : "❌ missing",
@@ -326,7 +326,7 @@ async function handleMessagingEvent(event) {
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.2.2 (Stage 2.2: + no-tools guardrail + output sanitizer)");
+  console.log("\n🚀 fb-chat-service v1.2.3 (Stage 2.3: + reject mode hallucination + no-tools guardrail + output sanitizer)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
