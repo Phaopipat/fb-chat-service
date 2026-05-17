@@ -20,6 +20,7 @@
 const express = require("express");
 const crypto = require("crypto");
 const { google } = require("googleapis");
+const { generateReply } = require("./ai-reply");
 
 const app = express();
 
@@ -31,6 +32,7 @@ const FB_APP_SECRET = process.env.FB_APP_SECRET || "";
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 const SHEET_TAB = process.env.SHEET_TAB || "Messages";
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 // ─── Safety gate (Stage 1.5) ───────────────────────────────────────────────
 // BOT_ENABLED: master kill-switch · "true" = อนุญาตให้บอท reply · ค่าอื่น = silent
@@ -145,9 +147,10 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.1.1",
+    version: "1.2.0",
     bot_enabled: BOT_ENABLED,
     echo_allowlist_count: ECHO_ENABLED_PSIDS.length,
+    anthropic_api_key: ANTHROPIC_API_KEY ? "✅ set" : "❌ missing",
     fb_verify_token: FB_VERIFY_TOKEN ? "✅ set" : "❌ missing",
     fb_page_token: FB_PAGE_ACCESS_TOKEN ? "✅ set" : "❌ missing",
     fb_app_secret: FB_APP_SECRET ? "✅ set" : "⚠️  optional, missing",
@@ -248,24 +251,42 @@ async function handleMessagingEvent(event) {
     direction,
   ]);
 
-  // ─── Stage 1: Echo back (test pipe) ──────────────────────────────────────
-  // Reply only to inbound text · skip echo/postback/attachment in MVP
+  // ─── Stage 2: AI Reply (กัปตัน persona) ──────────────────────────────────
+  // Reply only to inbound text · skip postback/attachment in MVP (Stage 4-5 จะเพิ่ม)
   // Safety gate: BOT_ENABLED=true AND senderId in ECHO_ENABLED_PSIDS allowlist
-  // Default: fail-closed (no reply) เพื่อกันลูกค้าจริงโดน [Echo Test]
+  // Default: fail-closed (no reply) เพื่อกันลูกค้าจริงโดน AI reply
   if (!isEcho && messageType === "text" && text) {
     if (!BOT_ENABLED) {
-      console.log(`[Echo] Skipped — BOT_ENABLED=false (silent mode)`);
+      console.log(`[AI] Skipped — BOT_ENABLED=false (silent mode)`);
     } else if (!ECHO_ENABLED_PSIDS.includes(senderId)) {
-      console.log(`[Echo] Skipped — ${senderId} not in ECHO_ENABLED_PSIDS allowlist`);
+      console.log(`[AI] Skipped — ${senderId} not in ECHO_ENABLED_PSIDS allowlist`);
     } else {
-      await sendFbMessage(senderId, `[Echo Test] ${text}`);
+      try {
+        const sheets = await getSheets();
+        const reply = await generateReply({
+          apiKey: ANTHROPIC_API_KEY,
+          senderId,
+          displayName: senderName,
+          text,
+          sheets,
+          spreadsheetId: GOOGLE_SHEET_ID,
+          sheetTab: SHEET_TAB,
+        });
+        if (reply) {
+          await sendFbMessage(senderId, reply);
+        } else {
+          console.warn("[AI] No reply generated — silent");
+        }
+      } catch (err) {
+        console.error("[AI] handleMessagingEvent error:", err.message);
+      }
     }
   }
 }
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.1.1 (Stage 1: Echo + Safety gate)");
+  console.log("\n🚀 fb-chat-service v1.2.0 (Stage 2: AI Reply · กัปตัน persona)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -275,5 +296,6 @@ app.listen(PORT, () => {
   console.log("  GOOGLE_SERVICE_ACCOUNT: ", GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ valid" : "❌ MISSING");
   console.log("  SHEET_TAB:              ", SHEET_TAB);
   console.log("  BOT_ENABLED:            ", BOT_ENABLED ? "✅ true" : "🔇 false (silent — no replies)");
-  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `✅ ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "⚠️  empty (no one gets echo)");
+  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `✅ ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "⚠️  empty (no one gets reply)");
+  console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING (AI replies will fallback to standby)");
 });
