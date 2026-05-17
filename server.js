@@ -98,12 +98,13 @@ async function getSenderName(senderId) {
 }
 
 // ─── Send API (outbound to FB Messenger) ───────────────────────────────────
+// Returns: { mid: string } on success · null on failure
 async function sendFbMessage(psid, text) {
   if (!FB_PAGE_ACCESS_TOKEN) {
     console.warn("[Send] FB_PAGE_ACCESS_TOKEN missing — skip send");
-    return;
+    return null;
   }
-  if (!psid || !text) return;
+  if (!psid || !text) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
     const res = await fetch(url, {
@@ -118,12 +119,36 @@ async function sendFbMessage(psid, text) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       console.error("[Send] Failed:", res.status, JSON.stringify(data));
-      return;
+      return null;
     }
     const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
     console.log(`[Send] → ${psid}: ${preview}`);
+    return { mid: data.message_id || "" };
   } catch (err) {
     console.error("[Send] Error:", err.message);
+    return null;
+  }
+}
+
+// ─── Log outbound row to Sheet (for history continuity) ────────────────────
+// ใช้ customer PSID ใน column D (ไม่ใช่ Page ID) เพื่อให้ getFbHistory ค้นเจอ
+async function logOutboundRow({ customerPsid, text, mid }) {
+  try {
+    const ts = new Date();
+    await appendRow([
+      ts.toISOString(),
+      ts.toISOString().slice(0, 10),
+      ts.toISOString().slice(11, 19),
+      customerPsid,           // D: customer PSID (consistent with inbound rows)
+      "(Page Bot)",           // E: sender name marker
+      "text",                 // F: messageType
+      text,                   // G: messageText
+      "",                     // H: extra
+      mid || "",              // I: messageId
+      "outbound",             // J: direction
+    ]);
+  } catch (err) {
+    console.error("[Log] outbound row error:", err.message);
   }
 }
 
@@ -147,7 +172,7 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.2.0",
+    version: "1.2.1",
     bot_enabled: BOT_ENABLED,
     echo_allowlist_count: ECHO_ENABLED_PSIDS.length,
     anthropic_api_key: ANTHROPIC_API_KEY ? "✅ set" : "❌ missing",
@@ -203,8 +228,14 @@ async function handleMessagingEvent(event) {
   if (!senderId) return;
 
   // ⚠️ FB ส่ง echo ของข้อความที่ Page ส่งออกด้วย ถ้าเปิด field "message_echoes"
+  // Skip is_echo entirely — เรา log outbound เองหลัง Send API (ดู logOutboundRow)
+  // ถ้าไม่ skip จะ double-log เมื่อ subscribe message_echoes
   const isEcho = event.message?.is_echo === true;
-  const direction = isEcho ? "outbound" : "inbound";
+  if (isEcho) {
+    console.log("[Webhook] Skipping is_echo event (logged via Send API path)");
+    return;
+  }
+  const direction = "inbound";
 
   const ts = new Date(event.timestamp || Date.now());
   const date = ts.toISOString().slice(0, 10);
@@ -255,7 +286,7 @@ async function handleMessagingEvent(event) {
   // Reply only to inbound text · skip postback/attachment in MVP (Stage 4-5 จะเพิ่ม)
   // Safety gate: BOT_ENABLED=true AND senderId in ECHO_ENABLED_PSIDS allowlist
   // Default: fail-closed (no reply) เพื่อกันลูกค้าจริงโดน AI reply
-  if (!isEcho && messageType === "text" && text) {
+  if (messageType === "text" && text) {
     if (!BOT_ENABLED) {
       console.log(`[AI] Skipped — BOT_ENABLED=false (silent mode)`);
     } else if (!ECHO_ENABLED_PSIDS.includes(senderId)) {
@@ -273,7 +304,16 @@ async function handleMessagingEvent(event) {
           sheetTab: SHEET_TAB,
         });
         if (reply) {
-          await sendFbMessage(senderId, reply);
+          const sendResult = await sendFbMessage(senderId, reply);
+          if (sendResult) {
+            // Log outbound row ใน Sheet · ใช้ customer PSID ใน column D
+            // เพื่อให้ getFbHistory ดึงประวัติ assistant ได้
+            await logOutboundRow({
+              customerPsid: senderId,
+              text: reply,
+              mid: sendResult.mid,
+            });
+          }
         } else {
           console.warn("[AI] No reply generated — silent");
         }
@@ -286,7 +326,7 @@ async function handleMessagingEvent(event) {
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.2.0 (Stage 2: AI Reply · กัปตัน persona)");
+  console.log("\n🚀 fb-chat-service v1.2.1 (Stage 2.1: AI Reply + outbound logging)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
