@@ -85,6 +85,36 @@ async function getSenderName(senderId) {
   }
 }
 
+// ─── Send API (outbound to FB Messenger) ───────────────────────────────────
+async function sendFbMessage(psid, text) {
+  if (!FB_PAGE_ACCESS_TOKEN) {
+    console.warn("[Send] FB_PAGE_ACCESS_TOKEN missing — skip send");
+    return;
+  }
+  if (!psid || !text) return;
+  try {
+    const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient: { id: psid },
+        messaging_type: "RESPONSE",
+        message: { text },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error("[Send] Failed:", res.status, JSON.stringify(data));
+      return;
+    }
+    const preview = text.length > 60 ? text.slice(0, 60) + "..." : text;
+    console.log(`[Send] → ${psid}: ${preview}`);
+  } catch (err) {
+    console.error("[Send] Error:", err.message);
+  }
+}
+
 // ─── Signature verification (x-hub-signature-256) ──────────────────────────
 function isValidSignature(req) {
   if (!FB_APP_SECRET) return true; // skip if not configured (dev only)
@@ -105,7 +135,7 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.0.0",
+    version: "1.1.0",
     fb_verify_token: FB_VERIFY_TOKEN ? "✅ set" : "❌ missing",
     fb_page_token: FB_PAGE_ACCESS_TOKEN ? "✅ set" : "❌ missing",
     fb_app_secret: FB_APP_SECRET ? "✅ set" : "⚠️  optional, missing",
@@ -205,11 +235,18 @@ async function handleMessagingEvent(event) {
     event.message?.mid || "",
     direction,
   ]);
+
+  // ─── Stage 1: Echo back (test pipe) ──────────────────────────────────────
+  // Reply only to inbound text · skip echo/postback/attachment in MVP
+  // Note: FB will webhook back as is_echo=true → auto-logged as outbound row
+  if (!isEcho && messageType === "text" && text) {
+    await sendFbMessage(senderId, `[Echo Test] ${text}`);
+  }
 }
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.0.0");
+  console.log("\n🚀 fb-chat-service v1.1.0 (Stage 1: Echo)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
