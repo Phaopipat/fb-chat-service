@@ -14,13 +14,19 @@
  *   FB_APP_SECRET                — App Secret (ใช้ verify x-hub-signature-256)
  *   GOOGLE_SHEET_ID              — Sheet ID
  *   GOOGLE_SERVICE_ACCOUNT_JSON  — Service account JSON (single-line, escaped \n in private_key)
- *   ANTHROPIC_API_KEY            — (optional, ตอนนี้ยังไม่เรียก) เผื่อใส่ sentiment ทีหลัง
+ *   ANTHROPIC_API_KEY            — Claude Haiku API key (Stage 2+)
+ *
+ * ENV optional:
+ *   BOT_ENABLED                  — "true" = อนุญาตให้บอท reply · ค่าอื่น = silent
+ *   ECHO_ENABLED_PSIDS           — comma-separated allowlist (fallback ถ้า Sheet read fail)
+ *   TEST_MODE_TAB                — Sheet tab name (default "TestMode")
  */
 
 const express = require("express");
 const crypto = require("crypto");
 const { google } = require("googleapis");
 const { generateReply } = require("./ai-reply");
+const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 
 const app = express();
 
@@ -33,11 +39,12 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 const SHEET_TAB = process.env.SHEET_TAB || "Messages";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const TEST_MODE_TAB = process.env.TEST_MODE_TAB || "TestMode";
 
-// ─── Safety gate (Stage 1.5) ───────────────────────────────────────────────
+// ─── Safety gate (Stage 1.5 + Stage 3) ─────────────────────────────────────
 // BOT_ENABLED: master kill-switch · "true" = อนุญาตให้บอท reply · ค่าอื่น = silent
-// ECHO_ENABLED_PSIDS: comma-separated allowlist · empty = ไม่ตอบใครเลย
-//   ตั้งค่าเช่น "1496719837083797,2560770274044371" เพื่อจำกัด tester
+// Stage 3: allowlist อ่านจาก Sheet "TestMode" tab (60s cache · admin แก้ได้ realtime)
+// ECHO_ENABLED_PSIDS: fallback allowlist (env-based) ใช้เมื่อ Sheet read fail
 const BOT_ENABLED = process.env.BOT_ENABLED === "true";
 const ECHO_ENABLED_PSIDS = (process.env.ECHO_ENABLED_PSIDS || "")
   .split(",")
@@ -169,12 +176,17 @@ function isValidSignature(req) {
 
 // ─── Routes ────────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
+  const cacheStatus = getCacheStatus();
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.2.3",
+    version: "1.3.0",
     bot_enabled: BOT_ENABLED,
-    echo_allowlist_count: ECHO_ENABLED_PSIDS.length,
+    test_mode_tab: TEST_MODE_TAB,
+    test_mode_allowed_count: cacheStatus.allowedCount,
+    test_mode_cache_age_seconds: Math.round(cacheStatus.cacheAgeMs / 1000),
+    test_mode_fetch_errored: cacheStatus.fetchErrored,
+    echo_allowlist_fallback_count: ECHO_ENABLED_PSIDS.length,
     anthropic_api_key: ANTHROPIC_API_KEY ? "✅ set" : "❌ missing",
     fb_verify_token: FB_VERIFY_TOKEN ? "✅ set" : "❌ missing",
     fb_page_token: FB_PAGE_ACCESS_TOKEN ? "✅ set" : "❌ missing",
@@ -182,6 +194,12 @@ app.get("/", (_req, res) => {
     sheet_id: GOOGLE_SHEET_ID ? "✅ set" : "❌ missing",
     service_account: GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ set" : "❌ missing",
   });
+});
+
+// Manual cache invalidation endpoint (no auth — local-only utility)
+app.post("/admin/refresh-testmode-cache", (_req, res) => {
+  invalidateCache();
+  res.json({ ok: true, message: "TestMode cache invalidated" });
 });
 
 // FB webhook verification (one-time setup)
@@ -229,7 +247,6 @@ async function handleMessagingEvent(event) {
 
   // ⚠️ FB ส่ง echo ของข้อความที่ Page ส่งออกด้วย ถ้าเปิด field "message_echoes"
   // Skip is_echo entirely — เรา log outbound เองหลัง Send API (ดู logOutboundRow)
-  // ถ้าไม่ skip จะ double-log เมื่อ subscribe message_echoes
   const isEcho = event.message?.is_echo === true;
   if (isEcho) {
     console.log("[Webhook] Skipping is_echo event (logged via Send API path)");
@@ -241,7 +258,7 @@ async function handleMessagingEvent(event) {
   const date = ts.toISOString().slice(0, 10);
   const time = ts.toISOString().slice(11, 19);
 
-  const senderName = isEcho ? "(Page)" : await getSenderName(senderId);
+  const senderName = await getSenderName(senderId);
 
   let messageType = "unknown";
   let text = "";
@@ -252,7 +269,7 @@ async function handleMessagingEvent(event) {
       messageType = "text";
       text = event.message.text;
     } else if (event.message.attachments?.length) {
-      messageType = event.message.attachments[0].type; // image, audio, video, file, location, fallback
+      messageType = event.message.attachments[0].type;
       extra = JSON.stringify(event.message.attachments[0].payload || {});
     } else if (event.message.sticker_id) {
       messageType = "sticker";
@@ -263,12 +280,12 @@ async function handleMessagingEvent(event) {
     text = event.postback.title || "";
     extra = event.postback.payload || "";
   } else if (event.delivery || event.read) {
-    return; // ignore delivery/read receipts
+    return;
   }
 
   console.log(`[${date} ${time}] ${direction} ${senderId} (${senderName}) ${messageType}: ${text}`);
 
-  // Schema: timestamp | date | time | senderId | name | type | text | extra | messageId | direction
+  // Log inbound row (Schema: timestamp|date|time|senderId|name|type|text|extra|messageId|direction)
   await appendRow([
     ts.toISOString(),
     date,
@@ -282,43 +299,50 @@ async function handleMessagingEvent(event) {
     direction,
   ]);
 
-  // ─── Stage 2: AI Reply (กัปตัน persona) ──────────────────────────────────
-  // Reply only to inbound text · skip postback/attachment in MVP (Stage 4-5 จะเพิ่ม)
-  // Safety gate: BOT_ENABLED=true AND senderId in ECHO_ENABLED_PSIDS allowlist
-  // Default: fail-closed (no reply) เพื่อกันลูกค้าจริงโดน AI reply
+  // ─── Stage 3: AI Reply (allowlist via Sheet TestMode tab) ────────────────
+  // Reply only to inbound text · safety gate via Sheet (with env fallback)
   if (messageType === "text" && text) {
     if (!BOT_ENABLED) {
       console.log(`[AI] Skipped — BOT_ENABLED=false (silent mode)`);
-    } else if (!ECHO_ENABLED_PSIDS.includes(senderId)) {
-      console.log(`[AI] Skipped — ${senderId} not in ECHO_ENABLED_PSIDS allowlist`);
     } else {
-      try {
-        const sheets = await getSheets();
-        const reply = await generateReply({
-          apiKey: ANTHROPIC_API_KEY,
-          senderId,
-          displayName: senderName,
-          text,
-          sheets,
-          spreadsheetId: GOOGLE_SHEET_ID,
-          sheetTab: SHEET_TAB,
-        });
-        if (reply) {
-          const sendResult = await sendFbMessage(senderId, reply);
-          if (sendResult) {
-            // Log outbound row ใน Sheet · ใช้ customer PSID ใน column D
-            // เพื่อให้ getFbHistory ดึงประวัติ assistant ได้
-            await logOutboundRow({
-              customerPsid: senderId,
-              text: reply,
-              mid: sendResult.mid,
-            });
+      // Stage 3: check TestMode tab allowlist (cached 60s)
+      const sheets = await getSheets();
+      const allowed = await isAllowed({
+        psid: senderId,
+        sheets,
+        spreadsheetId: GOOGLE_SHEET_ID,
+        tabName: TEST_MODE_TAB,
+        fallbackPsids: ECHO_ENABLED_PSIDS,
+      });
+
+      if (!allowed) {
+        console.log(`[AI] Skipped — ${senderId} not in TestMode (active) · also not in ECHO_ENABLED_PSIDS fallback`);
+      } else {
+        try {
+          const reply = await generateReply({
+            apiKey: ANTHROPIC_API_KEY,
+            senderId,
+            displayName: senderName,
+            text,
+            sheets,
+            spreadsheetId: GOOGLE_SHEET_ID,
+            sheetTab: SHEET_TAB,
+          });
+          if (reply) {
+            const sendResult = await sendFbMessage(senderId, reply);
+            if (sendResult) {
+              await logOutboundRow({
+                customerPsid: senderId,
+                text: reply,
+                mid: sendResult.mid,
+              });
+            }
+          } else {
+            console.warn("[AI] No reply generated — silent");
           }
-        } else {
-          console.warn("[AI] No reply generated — silent");
+        } catch (err) {
+          console.error("[AI] handleMessagingEvent error:", err.message);
         }
-      } catch (err) {
-        console.error("[AI] handleMessagingEvent error:", err.message);
       }
     }
   }
@@ -326,7 +350,7 @@ async function handleMessagingEvent(event) {
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.2.3 (Stage 2.3: + reject mode hallucination + no-tools guardrail + output sanitizer)");
+  console.log("\n🚀 fb-chat-service v1.3.0 (Stage 3: Sheet-based TestMode allowlist + 60s cache)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -335,7 +359,9 @@ app.listen(PORT, () => {
   console.log("  GOOGLE_SHEET_ID:        ", GOOGLE_SHEET_ID ? "✅ set" : "❌ MISSING");
   console.log("  GOOGLE_SERVICE_ACCOUNT: ", GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ valid" : "❌ MISSING");
   console.log("  SHEET_TAB:              ", SHEET_TAB);
+  console.log("  TEST_MODE_TAB:          ", TEST_MODE_TAB);
   console.log("  BOT_ENABLED:            ", BOT_ENABLED ? "✅ true" : "🔇 false (silent — no replies)");
-  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `✅ ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "⚠️  empty (no one gets reply)");
+  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `✅ ${ECHO_ENABLED_PSIDS.length} PSID(s) · fallback only` : "(empty fallback)");
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING (AI replies will fallback to standby)");
+  console.log("  ℹ️  TestMode allowlist: refreshed lazily on first message (60s cache)");
 });
