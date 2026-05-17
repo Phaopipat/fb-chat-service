@@ -32,6 +32,16 @@ const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
 const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "";
 const SHEET_TAB = process.env.SHEET_TAB || "Messages";
 
+// ─── Safety gate (Stage 1.5) ───────────────────────────────────────────────
+// BOT_ENABLED: master kill-switch · "true" = อนุญาตให้บอท reply · ค่าอื่น = silent
+// ECHO_ENABLED_PSIDS: comma-separated allowlist · empty = ไม่ตอบใครเลย
+//   ตั้งค่าเช่น "1496719837083797,2560770274044371" เพื่อจำกัด tester
+const BOT_ENABLED = process.env.BOT_ENABLED === "true";
+const ECHO_ENABLED_PSIDS = (process.env.ECHO_ENABLED_PSIDS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 // ─── Capture raw body for signature verification ───────────────────────────
 app.use(
   express.json({
@@ -135,7 +145,9 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.1.0",
+    version: "1.1.1",
+    bot_enabled: BOT_ENABLED,
+    echo_allowlist_count: ECHO_ENABLED_PSIDS.length,
     fb_verify_token: FB_VERIFY_TOKEN ? "✅ set" : "❌ missing",
     fb_page_token: FB_PAGE_ACCESS_TOKEN ? "✅ set" : "❌ missing",
     fb_app_secret: FB_APP_SECRET ? "✅ set" : "⚠️  optional, missing",
@@ -238,15 +250,22 @@ async function handleMessagingEvent(event) {
 
   // ─── Stage 1: Echo back (test pipe) ──────────────────────────────────────
   // Reply only to inbound text · skip echo/postback/attachment in MVP
-  // Note: FB will webhook back as is_echo=true → auto-logged as outbound row
+  // Safety gate: BOT_ENABLED=true AND senderId in ECHO_ENABLED_PSIDS allowlist
+  // Default: fail-closed (no reply) เพื่อกันลูกค้าจริงโดน [Echo Test]
   if (!isEcho && messageType === "text" && text) {
-    await sendFbMessage(senderId, `[Echo Test] ${text}`);
+    if (!BOT_ENABLED) {
+      console.log(`[Echo] Skipped — BOT_ENABLED=false (silent mode)`);
+    } else if (!ECHO_ENABLED_PSIDS.includes(senderId)) {
+      console.log(`[Echo] Skipped — ${senderId} not in ECHO_ENABLED_PSIDS allowlist`);
+    } else {
+      await sendFbMessage(senderId, `[Echo Test] ${text}`);
+    }
   }
 }
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.1.0 (Stage 1: Echo)");
+  console.log("\n🚀 fb-chat-service v1.1.1 (Stage 1: Echo + Safety gate)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -255,4 +274,6 @@ app.listen(PORT, () => {
   console.log("  GOOGLE_SHEET_ID:        ", GOOGLE_SHEET_ID ? "✅ set" : "❌ MISSING");
   console.log("  GOOGLE_SERVICE_ACCOUNT: ", GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ valid" : "❌ MISSING");
   console.log("  SHEET_TAB:              ", SHEET_TAB);
+  console.log("  BOT_ENABLED:            ", BOT_ENABLED ? "✅ true" : "🔇 false (silent — no replies)");
+  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `✅ ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "⚠️  empty (no one gets echo)");
 });
