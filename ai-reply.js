@@ -706,19 +706,117 @@ function standbyFor(text) {
   return detectLang(text) === "en" ? STANDBY_EN : STANDBY_TH;
 }
 
+// ─── Stage 2.2: FB MVP guardrails (prepend to system prompt) ────────────────
+// แก้ 2 issue: hallucinate availability + leak internal reasoning
+const FB_MVP_GUARDRAILS = `
+# ⚠️ STAGE 2 MVP CONSTRAINTS (FB Messenger version — สำคัญที่สุด)
+
+## ห้ามใช้ availability tool
+- บอทเวอร์ชันนี้ **ไม่มี** เครื่องมือเช็คห้องว่าง · ไม่มี Drive sheet · ไม่มี database
+- **ห้าม** ตอบ "ขอเช็คห้องว่างให้นะครับ" / "รอสักครู่ครับ" + "✅ ห้องว่างครับ" / "มีห้อง" / "ไม่มีห้อง" / "ห้องเต็ม"
+- **ห้าม** pretend ว่า "เช็คแล้ว" หรือใช้ marker "---" + ผลตรวจ
+- ทุกคำถามเกี่ยวกับ "วันที่ X ห้องว่างมั้ย" / "มีห้องไหม" / "available?" →
+  **ตอบสั้น**: "ขอเจ้าหน้าที่ช่วยเช็คห้องว่างให้นะครับ 🙏 — รบกวนรอสักครู่ครับ"
+- บอกราคา + แนะนำห้องได้ตามปกติ แต่ห้ามยืนยัน availability เด็ดขาด
+
+## OUTPUT RULES (สำคัญที่สุด — ห้ามมีข้อความเหล่านี้ในข้อความถึงลูกค้า)
+ส่งคืน **เฉพาะข้อความตอบลูกค้า** เป็น plain text · ห้ามใส่:
+- "ตามกฎ" / "ตามสไตล์" / "ตาม policy" / "ตามข้อกำหนด"
+- Version markers แบบ \`POOTALAY_DATE_DEFAULT_V18\`, \`_V14\`, \`_V20\`, \`_V31\` ฯลฯ
+- Separator "---" หรือ "═══" หรือเส้นใดๆ
+- Internal reasoning ในวงเล็บแบบ "(รอข้อมูลจากลูกค้า...)" / "(เดาว่า...)" / "(ลูกค้าน่าจะ...)"
+- ลูกศร analysis "→ default" / "→ analysis" / "→ infer"
+- ข้อความ meta แบบ "ลูกค้าบอก X · เดือนปัจจุบัน Y · ดังนั้น..."
+
+ถ้ามี date ambiguity → **ตอบลูกค้าโดยถามตรงๆ** เช่น "วันที่ 25 หมายถึงเดือนไหนครับ พ.ค. หรือ มิ.ย. ครับ?" · **ห้ามอธิบายว่าทำไมถึงเดา**
+
+## ตัวอย่างถูก / ผิด
+
+❌ ผิด (leak internal reasoning):
+\`\`\`
+ลูกค้าบอก "วันที่ 25" แต่ไม่ระบุเดือน · เดือนปัจจุบันคือพฤษภาคม → default = มิถุนายน
+ตามกฎ POOTALAY_DATE_DEFAULT_V18: ระบุสมมติฐานในประโยคเดียว
+---
+ลูกค้าพักกี่คืนครับ?
+\`\`\`
+
+✅ ถูก (ตอบลูกค้าตรงๆ):
+\`\`\`
+วันที่ 25 หมายถึงเดือนไหนครับ พ.ค.หรือ มิ.ย.? 📅
+และพักกี่คืนครับ?
+\`\`\`
+
+❌ ผิด (hallucinate availability):
+\`\`\`
+ขอเช็คห้องว่างให้นะครับ · รอสักครู่ครับ
+---
+✅ ห้องว่างครับ 🏠
+\`\`\`
+
+✅ ถูก (escalate):
+\`\`\`
+25-27 มิ.ย. 2 ท่านนะครับ 😊 ขอเจ้าหน้าที่ช่วยเช็คห้องว่างให้นะครับ 🙏
+\`\`\`
+
+---
+`;
+
+// ─── Stage 2.2: Sanitize bot output (remove leaked internal markers) ────────
+function sanitizeReply(text) {
+  if (!text) return text;
+  let cleaned = text;
+  // ลบบรรทัดที่ขึ้นต้นด้วย "ตามกฎ" / "ตามสไตล์" / "ตาม policy"
+  cleaned = cleaned.replace(/^[ \t]*(ตามกฎ|ตามสไตล์|ตาม policy|ตาม guidelines|ตามข้อกำหนด)[^\n]*\n?/gmi, "");
+  // ลบ version markers แบบ FOO_BAR_V14, _V18, etc. ที่อยู่ในบรรทัด (เช่น "ตามกฎ POOTALAY_DATE_DEFAULT_V18: ...")
+  cleaned = cleaned.replace(/[A-Z][A-Z_]+_V\d+[: ]*/g, "");
+  // ลบ separator "---" / "═══" / "■■■" ทั้งบรรทัด
+  cleaned = cleaned.replace(/^[ \t]*[-═■─]{3,}[ \t]*$/gm, "");
+  // ลบ commentary ในวงเล็บที่เป็น meta/internal — เก็บไว้เฉพาะวงเล็บที่ "พูดกับลูกค้า"
+  cleaned = cleaned.replace(/\((?:รอข้อมูล|เดาว่า|infer|analysis|note:|กฎ:|rule:)[^)]*\)/gi, "");
+  // ลบ "→ default" / "→ analysis" / "→ infer" patterns
+  cleaned = cleaned.replace(/→[ \t]*(default|analysis|infer|reasoning|note)[^\n]*/gi, "");
+  // ลบ meta reasoning lines "ลูกค้าบอก ... · เดือนปัจจุบัน ... · ดังนั้น ..."
+  cleaned = cleaned.replace(/^[ \t]*ลูกค้าบอก[^\n]*·[^\n]*·[^\n]*\n?/gm, "");
+  // ลบ blank lines ที่ตามมาเป็นชุด (>2 บรรทัดเปล่า → 1)
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  return cleaned;
+}
+
 // ─── History from Sheet (iB Chatlog · Messages tab) ────────────────────────
 // Schema: A=ts B=date C=time D=senderId E=name F=type G=text H=extra I=mid J=direction
-async function getFbHistory({ sheets, spreadsheetId, sheetTab, senderId, limit = 10 }) {
+// Stage 2.2: Time-filtered (last `windowMinutes` only) เพื่อกัน session bleed
+async function getFbHistory({
+  sheets,
+  spreadsheetId,
+  sheetTab,
+  senderId,
+  limit = 10,
+  windowMinutes = 30,
+}) {
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
       range: `${sheetTab}!A:J`,
     });
     const rows = res.data.values || [];
-    // Filter text-only rows for this senderId · take last `limit`
+    const cutoff = Date.now() - windowMinutes * 60 * 1000;
+    // Filter: matching senderId + text type + within time window
     const userRows = rows
-      .filter((r) => r[3] === senderId && r[5] === "text" && r[6])
+      .filter((r) => {
+        if (r[3] !== senderId) return false;
+        if (r[5] !== "text") return false;
+        if (!r[6]) return false;
+        // Parse ISO timestamp · skip rows older than cutoff
+        const ts = new Date(r[0]).getTime();
+        if (isNaN(ts) || ts < cutoff) return false;
+        return true;
+      })
       .slice(-limit);
+    if (userRows.length === 0) {
+      console.log(`[AI] No history for ${senderId} within ${windowMinutes}min window`);
+    } else {
+      console.log(`[AI] History: ${userRows.length} turns (within ${windowMinutes}min) for ${senderId}`);
+    }
     return userRows.map((r) => ({
       role: r[9] === "outbound" ? "assistant" : "user",
       content: r[6],
@@ -759,8 +857,9 @@ async function generateReply({
       },
       body: JSON.stringify({
         model: "claude-haiku-4-5-20251001",
-        max_tokens: 800,
-        system: KAPTAN_SYSTEM_PROMPT,
+        max_tokens: 600,
+        // Stage 2.2: prepend FB MVP guardrails (no-tools, output-rule) ก่อน KAPTAN
+        system: FB_MVP_GUARDRAILS + "\n" + KAPTAN_SYSTEM_PROMPT,
         messages,
       }),
       signal: AbortSignal.timeout(25000),
@@ -773,12 +872,21 @@ async function generateReply({
     }
 
     const data = await res.json();
-    const reply = data.content?.find((b) => b.type === "text")?.text?.trim();
-    if (!reply) {
+    const raw = data.content?.find((b) => b.type === "text")?.text?.trim();
+    if (!raw) {
       console.warn("[AI] Empty reply — fallback to standby");
       return standbyFor(text);
     }
-    return reply;
+    // Stage 2.2: sanitize output (strip internal reasoning markers)
+    const cleaned = sanitizeReply(raw);
+    if (cleaned !== raw) {
+      console.log(`[AI] Sanitized output (${raw.length} → ${cleaned.length} chars)`);
+    }
+    if (!cleaned) {
+      console.warn("[AI] All-empty after sanitize — fallback to standby");
+      return standbyFor(text);
+    }
+    return cleaned;
   } catch (err) {
     console.error("[AI] Generate error:", err.message);
     return standbyFor(text);
@@ -790,5 +898,7 @@ module.exports = {
   getFbHistory,
   standbyFor,
   detectLang,
+  sanitizeReply,
   KAPTAN_SYSTEM_PROMPT,
+  FB_MVP_GUARDRAILS,
 };
