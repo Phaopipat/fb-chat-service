@@ -242,7 +242,7 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.4.0",
+    version: "1.4.1",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -440,7 +440,7 @@ async function handleMessagingEvent(event) {
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.4.0 (Stage 4: Image delivery · LINE host · image-lint)");
+  console.log("\n🚀 fb-chat-service v1.4.1 (Stage 4: Image delivery · LINE host · image-lint)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");

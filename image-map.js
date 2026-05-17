@@ -1,23 +1,14 @@
 /**
- * fb-chat-service image-map.js · Stage 4 (v1.4.0) · Lite version
+ * fb-chat-service image-map.js · v1.4.1
  *
- * Lightweight image catalog + keyword matcher for FB Messenger
- * Images hosted on LINE bot's webhook-kohtalu (Express static)
- *
- * Coverage (MVP — ~13 categories):
- *   Rooms: Manila Deluxe · Thai Style Villa · Thai Style Single · Home Chalet · Beach Chalet
- *   Activities: snorkeling · sailing · kayaking · sunset_fishing · thai_massage · restaurant
- *   Scenic: top_view · mainland_pier · location
- *
- * To extend: add new category to CATALOG + add regex to matchImages()
- * To swap host: set IMAGE_HOST env var
+ * Changes from v1.4.0:
+ *   - Generic room regex: removed ^anchor · added "รูปห้อง" / "ห้อง.*หน่อย" / "ดูห้อง"
+ *   - Moved restaurant detection ABOVE generic room to prevent "ห้องอาหาร" → manila_deluxe
  */
 
 const IMAGE_HOST =
   process.env.IMAGE_HOST || "https://webhook-kohtalu-production.up.railway.app";
 
-// ─── Catalog ────────────────────────────────────────────────────────────────
-// แต่ละ category เก็บ 1-3 รูป (FB Send API ส่งแยก message · ไม่ควรเกิน 3-4 รูปต่อ reply)
 const CATALOG = {
   manila_deluxe: [
     `${IMAGE_HOST}/images/rooms/interior/D14/1.jpg`,
@@ -83,8 +74,6 @@ const CATALOG = {
   ],
 };
 
-// ─── Detection ──────────────────────────────────────────────────────────────
-// ตรวจว่าลูกค้าขอรูปหรือไม่
 function isImageRequest(text) {
   if (!text) return false;
   return /ขอรูป|ดูรูป|มีรูป|ส่งรูป|รูปห้อง|รูปอาหาร|รูปเกาะ|รูปบรรยากาศ|รูปกิจกรรม|รูป.*หน่อย|รูป.*ครับ|รูป.*ค่ะ|รูปไหม|photo|picture|\bpic\b|image|show.*pic|see.*pic|see.*photo/i.test(
@@ -92,21 +81,14 @@ function isImageRequest(text) {
   );
 }
 
-// ─── Match ──────────────────────────────────────────────────────────────────
-// คืน { category, urls } หรือ null
-// ลำดับ regex: specific keywords ก่อน · generic ทีหลัง
 function matchImages(text) {
   if (!text) return null;
 
-  // Beach Chalet (specific keyword)
+  // Specific room types FIRST
   if (/beach[\s-]?chalet|บีชชาเล่|บีชชาเลย์|เบียช.*ชาเล่/i.test(text))
     return { category: "beach_chalet", urls: CATALOG.beach_chalet };
-
-  // Home Chalet (specific) — must come before generic "home"
   if (/home[\s-]?chalet|เรือนไทย|home$|^home\b/i.test(text))
     return { category: "home_chalet", urls: CATALOG.home_chalet };
-
-  // Manila Deluxe
   if (/manila|มะนิลา|มานิลา|deluxe|ดีลัก|ดีลักซ์/i.test(text))
     return { category: "manila_deluxe", urls: CATALOG.manila_deluxe };
 
@@ -138,12 +120,13 @@ function matchImages(text) {
   if (/แผนที่|map|location|พิกัด|directions/i.test(text))
     return { category: "location", urls: CATALOG.location };
 
-  // Food / Restaurant
-  if (/อาหาร|ร้านอาหาร|restaurant|food|menu|เมนู|ห้องอาหาร/i.test(text))
+  // ⚠️ Restaurant/food MUST come BEFORE generic room (so "ห้องอาหาร" matches restaurant)
+  if (/ห้องอาหาร|อาหาร|ร้านอาหาร|restaurant|food|menu|เมนู|ของกิน/i.test(text))
     return { category: "restaurant", urls: CATALOG.restaurant };
 
-  // Generic room request → default to Manila Deluxe (most popular)
-  if (/ห้องพัก|^ห้อง|room|accommodation/i.test(text))
+  // v1.4.1: Generic room request — removed ^anchor · expanded keywords
+  // Now matches "ขอรูปห้อง", "ห้องไหน", "ห้องพัก", "ดูห้อง", "room", etc.
+  if (/รูปห้อง|ห้องพัก|ห้องไหน|ดูห้อง|ห้อง.*หน่อย|มีห้อง|ห้องอะไร|room|accommodation/i.test(text))
     return { category: "manila_deluxe", urls: CATALOG.manila_deluxe };
 
   return null;
