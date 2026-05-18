@@ -1,15 +1,9 @@
 /**
- * fb-chat-service slip-verifier.js · Stage 5 (v1.5.0)
+ * fb-chat-service slip-verifier.js · Stage 6.5 (v1.7.0)
  *
- * Port จาก webhook-kohtalu slip-verifier.js (Phase 2d v2)
- * Adapted สำหรับ FB Messenger:
- *   - LINE downloadLineContent(messageId, lineToken) → FB downloadFbAttachment(url)
- *   - Native fetch + FormData (Node 18+) แทน axios + form-data package
- *   - SlipOK API call: unchanged structure (POST FormData · x-authorization header)
- *
- * Env vars required (SAME as LINE bot):
- *   SLIPOK_BRANCH_1_ID, SLIPOK_BRANCH_1_KEY, SLIPOK_BRANCH_1_NAME (optional)
- *   SLIPOK_BRANCH_2_ID, SLIPOK_BRANCH_2_KEY, SLIPOK_BRANCH_2_NAME (optional)
+ * Same as Stage 5 v1.5.0 EXCEPT:
+ *   - saveSlipToBookingHold() now returns { ok, rowIndex } instead of true/false
+ *     so booking-collector can update col N (customerEmail) later.
  *
  * BookingHold schema (iB Chatlog Sheet · 14 cols A:N):
  *   A=psid              B=displayName       C=bookingRef       D=expectedAmount
@@ -41,11 +35,8 @@ function loadSlipOKBranches() {
 }
 
 // ─── FB CDN download ─────────────────────────────────────────────────────────
-// FB attachment URL is on scontent.xx.fbcdn.net domain · time-limited but accessible
 async function downloadFbAttachment(url) {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(15000),
-  });
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
   if (!res.ok) {
     throw new Error(`FB CDN download failed: ${res.status} ${res.statusText}`);
   }
@@ -54,23 +45,8 @@ async function downloadFbAttachment(url) {
 }
 
 // ─── SlipOK API call (single branch) ────────────────────────────────────────
-// Returns:
-//   { ok: true, data: <slip-data>, branch }
-//   { ok: false, error: '<category>', code, message, data?, branch }
-//
-// Error category mapping (per SlipOK error codes 1000-1015):
-//   1002 → 'key_error'
-//   1003,1004,1015 → 'quota_exhausted'
-//   1005-1008 → 'not_a_slip'
-//   1009 → 'bank_down'
-//   1010 → 'bank_delay'
-//   1011 → 'not_found'
-//   1012 → 'repeat'
-//   1013 → 'wrong_amount'
-//   1014 → 'wrong_receiver'
 async function callSlipOK(buffer, branch) {
   const form = new FormData();
-  // Convert Buffer → Blob (Node 18+ has Blob)
   const blob = new Blob([buffer], { type: "image/jpeg" });
   form.append("files", blob, "slip.jpg");
   form.append("log", "true");
@@ -79,9 +55,7 @@ async function callSlipOK(buffer, branch) {
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        "x-authorization": branch.apiKey,
-      },
+      headers: { "x-authorization": branch.apiKey },
       body: form,
       signal: AbortSignal.timeout(20000),
     });
@@ -119,13 +93,7 @@ async function callSlipOK(buffer, branch) {
 }
 
 // ─── PUBLIC: verifySlip ──────────────────────────────────────────────────────
-// Tries each configured SlipOK branch in order · stops on first success
-// Continues to next branch ONLY on 1014 (wrong_receiver — try another bank)
-//
-// @param {string} fbAttachmentUrl  URL from event.message.attachments[0].payload.url
-// @returns {object} {ok, amount, ref, time, senderName, receiverName, ...} or {ok:false, error}
 async function verifySlip({ fbAttachmentUrl, _slipokBranches }) {
-  // 1. Download image from FB CDN
   let buffer;
   try {
     buffer = await downloadFbAttachment(fbAttachmentUrl);
@@ -135,14 +103,12 @@ async function verifySlip({ fbAttachmentUrl, _slipokBranches }) {
     return { ok: false, error: "api_error", detail: err.message };
   }
 
-  // 2. Load branches
   const branches = Array.isArray(_slipokBranches) ? _slipokBranches : loadSlipOKBranches();
   if (branches.length === 0) {
     console.error("[slip] No SlipOK branches configured");
     return { ok: false, error: "config_error" };
   }
 
-  // 3. Try each branch
   let lastError = { ok: false, error: "api_error" };
   let slipDataFromError = null;
 
@@ -198,38 +164,47 @@ async function verifySlip({ fbAttachmentUrl, _slipokBranches }) {
   };
 }
 
-// ─── Save slip to BookingHold (FB MVP — no pending booking lookup) ──────────
-// Each verified slip → new row with status="fb_pending_review"
-// Admin manually matches to actual booking in BookingHold tab
+// ─── Save slip to BookingHold · NOW RETURNS rowIndex ─────────────────────────
+// Stage 6.5 change: parse updatedRange "BookingHold!A37:N37" → rowIndex=37
+// so booking-collector can update col N (customerEmail) at row N{rowIndex} later
 async function saveSlipToBookingHold({ sheets, spreadsheetId, psid, displayName, slipData }) {
   try {
     const row = [
-      psid,                                     // A: psid
-      displayName || "",                        // B: displayName
-      "",                                       // C: bookingRef (admin fills)
-      "",                                       // D: expectedAmount (admin fills)
-      "",                                       // E: tolerance
-      "fb_pending_review",                      // F: status — FB-specific status
-      bkkNow(),                                 // G: createdAt
-      "",                                       // H: confirmedAt (admin fills when matched)
-      slipData.ref || "",                       // I: matchedTransRef
-      String(slipData.amount || 0),             // J: matchedAmount
-      `FB slip · sender=${slipData.senderName} · receiver=${slipData.receiverName} · branch=${slipData.matchedBranch}`,  // K: notes
-      "",                                       // L: expiresAt
-      slipData.senderName || "",                // M: bookingPersonName (use sender name)
-      "",                                       // N: customerEmail (admin or future flow)
+      psid,
+      displayName || "",
+      "",
+      "",
+      "",
+      "fb_pending_review",
+      bkkNow(),
+      "",
+      slipData.ref || "",
+      String(slipData.amount || 0),
+      `FB slip · sender=${slipData.senderName} · receiver=${slipData.receiverName} · branch=${slipData.matchedBranch}`,
+      "",
+      slipData.senderName || "",
+      "",
     ];
-    await sheets.spreadsheets.values.append({
+    const appendRes = await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: "BookingHold!A:N",
       valueInputOption: "USER_ENTERED",
       requestBody: { values: [row] },
     });
-    console.log(`[slip] Saved to BookingHold (FB · status=fb_pending_review) · ref=${slipData.ref} amount=${slipData.amount}`);
-    return true;
+
+    // Parse rowIndex from updatedRange · e.g., "BookingHold!A37:N37" → 37
+    let rowIndex = null;
+    const updatedRange = appendRes.data?.updates?.updatedRange || "";
+    const m = updatedRange.match(/!A(\d+):/);
+    if (m) rowIndex = Number(m[1]);
+
+    console.log(
+      `[slip] Saved to BookingHold (FB · status=fb_pending_review · row=${rowIndex || "?"}) · ref=${slipData.ref} amount=${slipData.amount}`
+    );
+    return { ok: true, rowIndex };
   } catch (err) {
     console.error("[slip] saveSlipToBookingHold error:", err.message);
-    return false;
+    return { ok: false, rowIndex: null };
   }
 }
 
@@ -241,12 +216,10 @@ function formatSlipReply(result) {
       `ตรวจสลิปสำเร็จครับ ✅\n` +
       `จำนวน: **${amount}฿**\n` +
       `อ้างอิง: ${result.ref}\n` +
-      `เวลา: ${result.time}\n\n` +
-      `ขอเจ้าหน้าที่ตรวจสอบและยืนยันการจองนะครับ 🙏`
+      `เวลา: ${result.time}`
     );
   }
 
-  // Error cases
   switch (result.error) {
     case "repeat":
       return "สลิปนี้เคยส่งมาแล้วครับ 🙏 หากเป็นการจองใหม่ ขอสลิปอันใหม่ครับ (ส่ง 1 สลิป/1 รายการ)";
@@ -258,7 +231,6 @@ function formatSlipReply(result) {
     case "wrong_amount":
       return "จำนวนเงินไม่ตรงกับที่ระบุไว้ครับ 🙏 ขอเจ้าหน้าที่ช่วยตรวจสอบนะครับ";
     case "not_a_slip":
-      // Don't reply — let normal AI flow handle (it's probably not a slip image)
       return null;
     case "bank_delay":
       return "ระบบธนาคารดีเลย์ครับ 🙏 ขอเจ้าหน้าที่ตรวจสอบให้นะครับ (BBL/SCB บางครั้งมีการดีเลย์)";

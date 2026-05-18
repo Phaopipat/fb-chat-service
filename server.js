@@ -1,31 +1,34 @@
 /**
  * fb-chat-service — Facebook Messenger webhook → Google Sheet logger
- * v1.6.0 Stage 6 · Email Confirmation (Brevo REST API)
+ * v1.7.0 Stage 6.5 · Booking Collector (Names + Phone + Email · LINE Phase 3.6 parity)
  *
- * What's new vs v1.5.0 (Stage 5):
- *   - After successful slip verification + BookingHold save → fire-and-forget
- *     sendBookingConfirmation({ booking, slipData }) to reservation@taluisland.com
- *   - Email send is non-blocking · errors logged but don't break user reply
- *   - /health endpoint shows email config status
+ * What's new vs v1.6.0 (Stage 6):
+ *   - After slip verified → start booking-collector session (asks for names + phone + email)
+ *   - Email send moved INTO collector._finalize() → CC ลูกค้าได้ทันทีเมื่อ email collected
+ *   - Booking-collector takes priority over AI reply when isCollecting(psid)
+ *   - Image attachments during collection → Claude vision OCR for ID card / passport
+ *   - Drive traveler sheet auto-created when names provided
+ *   - BookingHold col N (customerEmail) auto-filled from chat
  *
- * Endpoints:
- *   GET  /                              → health (now includes email config)
- *   GET  /webhook                       → FB verification (hub.challenge)
- *   POST /webhook                       → รับ messaging events
- *   POST /admin/refresh-testmode-cache  → manual TestMode cache refresh
- *   GET  /admin/slipok-quotas           → check SlipOK quota for each branch
+ * Flow:
+ *   1. Customer sends slip image
+ *   2. Bot: verifies slip + saves to BookingHold (returns rowIndex)
+ *   3. Bot: replies "ตรวจสลิปสำเร็จครับ ✅..."
+ *   4. Bot: startNameCollection({ psid, rowIndex, slipData, ... })
+ *   5. Bot: sends "ขอรายชื่อสมาชิก + เบอร์ + email (ถ้ามี)" prompt
+ *   6. Customer: replies with names + phone + (optional email)
+ *   7. Bot: parses fields → if missing phone, ask for phone; else finalize
+ *   8. Finalize: write col N · create Drive sheet · send Brevo email (with CC if email)
+ *   9. Bot: sends summary + sheet link to customer
  *
  * ENV required:
  *   FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN, FB_APP_SECRET
- *   GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON
+ *   GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON  (must include drive scope)
  *   ANTHROPIC_API_KEY
- *   SLIPOK_BRANCH_{1,2}_{ID,KEY,NAME}  (Stage 5)
+ *   SLIPOK_BRANCH_{1,2}_{ID,KEY,NAME}
+ *   BREVO_API_KEY, EMAIL_FROM, EMAIL_RESERVATION
  *
- * ENV optional (Stage 6 — graceful degrade if missing):
- *   BREVO_API_KEY        → ถ้าไม่ set บอท skip email (log warn)
- *   EMAIL_FROM           → default "Koh Talu Resort <reservation@taluisland.com>"
- *   EMAIL_RESERVATION    → primary recipient (default reservation@taluisland.com)
- *
+ * ENV optional:
  *   BOT_ENABLED (default false)
  *   ECHO_ENABLED_PSIDS (fallback allowlist)
  *   TEST_MODE_TAB (default "TestMode")
@@ -45,7 +48,13 @@ const {
   formatSlipReply,
   loadSlipOKBranches,
 } = require("./slip-verifier");
-const { sendBookingConfirmation } = require("./email-sender");
+const {
+  startNameCollection,
+  isCollecting,
+  cancelCollection,
+  handleCollectorText,
+  handleCollectorImage,
+} = require("./booking-collector");
 
 const app = express();
 
@@ -70,7 +79,7 @@ const ECHO_ENABLED_PSIDS = (process.env.ECHO_ENABLED_PSIDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// ─── Capture raw body for signature verification ───────────────────────────
+// ─── Raw body capture for signature verification ───────────────────────────
 app.use(
   express.json({
     verify: (req, _res, buf) => {
@@ -79,19 +88,30 @@ app.use(
   })
 );
 
-// ─── Google Sheets client (lazy init) ──────────────────────────────────────
-let sheetsClient = null;
-async function getSheets() {
-  if (sheetsClient) return sheetsClient;
-  if (!GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON not set");
+// ─── Google auth + clients (lazy init) ─────────────────────────────────────
+let _authClient = null;
+let _sheetsClient = null;
 
+async function getGoogleAuth() {
+  if (_authClient) return _authClient;
+  if (!GOOGLE_SERVICE_ACCOUNT_JSON) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON not set");
   const credentials = JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON);
   const auth = new google.auth.GoogleAuth({
     credentials,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    scopes: [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/drive",
+    ],
   });
-  sheetsClient = google.sheets({ version: "v4", auth: await auth.getClient() });
-  return sheetsClient;
+  _authClient = await auth.getClient();
+  return _authClient;
+}
+
+async function getSheets() {
+  if (_sheetsClient) return _sheetsClient;
+  const auth = await getGoogleAuth();
+  _sheetsClient = google.sheets({ version: "v4", auth });
+  return _sheetsClient;
 }
 
 async function appendRow(values) {
@@ -125,8 +145,7 @@ async function getSenderName(senderId) {
 
 // ─── Send API ──────────────────────────────────────────────────────────────
 async function sendFbMessage(psid, text) {
-  if (!FB_PAGE_ACCESS_TOKEN) return null;
-  if (!psid || !text) return null;
+  if (!FB_PAGE_ACCESS_TOKEN || !psid || !text) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
     const res = await fetch(url, {
@@ -153,8 +172,7 @@ async function sendFbMessage(psid, text) {
 }
 
 async function sendFbImage(psid, imageUrl) {
-  if (!FB_PAGE_ACCESS_TOKEN) return null;
-  if (!psid || !imageUrl) return null;
+  if (!FB_PAGE_ACCESS_TOKEN || !psid || !imageUrl) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
     const res = await fetch(url, {
@@ -232,29 +250,22 @@ async function logOutboundImage({ customerPsid, imageUrl, category }) {
   }
 }
 
-// ─── Stage 6: Fire-and-forget email confirmation ───────────────────────────
-function fireEmailConfirmation({ slipResult, senderId, senderName }) {
-  // Build minimal booking object · admin can update bookingRef later in BookingHold
-  const booking = {
-    bookingRef: "", // ยังไม่มี · admin จะกรอกใน BookingHold เมื่อ match กับ booking จริง
-    displayName: senderName || `FB:${senderId.slice(-8)}`,
-    bookingPersonName: slipResult.senderName || "-",
-    customerEmail: "", // FB ไม่ได้ขอ email ตอน slip submit · จะ CC ลูกค้าได้ก็ต่อเมื่อ admin อัปเดต col N
-  };
-
-  // Fire-and-forget · ไม่ block reply
-  sendBookingConfirmation({ booking, slipData: slipResult, customerEmail: "" })
-    .then((result) => {
-      if (result.ok) {
-        console.log(`[Email] ✅ FB confirmation sent · psid=${senderId} · msgId=${result.messageId}`);
-      } else {
-        console.warn(`[Email] ⚠️  FB confirmation failed · psid=${senderId} · error=${result.error}`);
-      }
-    })
-    .catch((err) => {
-      console.error(`[Email] ❌ FB confirmation exception · psid=${senderId} · ${err.message}`);
-    });
+// ─── Send helper: text + log ───────────────────────────────────────────────
+async function sendAndLog(psid, text, extra = "") {
+  const sendResult = await sendFbMessage(psid, text);
+  if (sendResult) {
+    await logOutboundRow({ customerPsid: psid, text, mid: sendResult.mid, extra });
+  }
+  return sendResult;
 }
+
+// ─── Booking-collector prompt template ──────────────────────────────────────
+const COLLECTOR_KICKOFF_PROMPT =
+  "เพื่อให้ confirmation ครบถ้วน ขอข้อมูลเพิ่มเติมหน่อยครับ 🙏\n\n" +
+  "1️⃣ รายชื่อสมาชิกที่เข้าพัก (1 ชื่อต่อบรรทัด)\n" +
+  "2️⃣ เบอร์โทรติดต่อหลัก\n" +
+  "3️⃣ Email สำหรับ confirmation (ถ้าต้องการสำเนา)\n\n" +
+  "ส่งมาในข้อความเดียวกันได้เลยครับ หรือถ่ายรูปบัตรประชาชน/passport ส่งมาก็ได้ครับ 📸";
 
 // ─── Signature verification ────────────────────────────────────────────────
 function isValidSignature(req) {
@@ -277,8 +288,8 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.6.0",
-    stage: "Stage 6 · Email Confirmation (Brevo REST API)",
+    version: "1.7.0",
+    stage: "Stage 6.5 · Booking Collector (Names + Phone + Email · LINE Phase 3.6 parity)",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -339,8 +350,7 @@ async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
   if (!senderId) return;
 
-  const isEcho = event.message?.is_echo === true;
-  if (isEcho) {
+  if (event.message?.is_echo === true) {
     console.log("[Webhook] Skipping is_echo event");
     return;
   }
@@ -348,7 +358,6 @@ async function handleMessagingEvent(event) {
   const ts = new Date(event.timestamp || Date.now());
   const date = ts.toISOString().slice(0, 10);
   const time = ts.toISOString().slice(11, 19);
-
   const senderName = await getSenderName(senderId);
 
   let messageType = "unknown";
@@ -362,7 +371,7 @@ async function handleMessagingEvent(event) {
       text = event.message.text;
     } else if (event.message.attachments?.length) {
       const att = event.message.attachments[0];
-      messageType = att.type; // image, audio, video, file, location, fallback
+      messageType = att.type;
       extra = JSON.stringify(att.payload || {});
       attachmentUrl = att.payload?.url || "";
     } else if (event.message.sticker_id) {
@@ -377,9 +386,11 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  console.log(`[${date} ${time}] inbound ${senderId} (${senderName}) ${messageType}: ${text || "(attachment)"}`);
+  console.log(
+    `[${date} ${time}] inbound ${senderId} (${senderName}) ${messageType}: ${text || "(attachment)"}`
+  );
 
-  // Log inbound row (ทุก message)
+  // Log inbound row
   await appendRow([
     ts.toISOString(),
     date,
@@ -401,6 +412,7 @@ async function handleMessagingEvent(event) {
 
   // ─── TestMode allowlist ───────────────────────────────────────────────────
   const sheets = await getSheets();
+  const auth = await getGoogleAuth();
   const allowed = await isAllowed({
     psid: senderId,
     sheets,
@@ -414,42 +426,91 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  // ─── Stage 5: Slip verification (image attachments) ─────────────────────
+  // ─── Stage 6.5: Booking-collector takes priority if in session ──────────
+  if (isCollecting(senderId)) {
+    console.log(`[Collector] Active for ${senderId} · routing to handleCollector*`);
+
+    let collectorResult = null;
+    if (messageType === "text" && text) {
+      collectorResult = await handleCollectorText({
+        psid: senderId,
+        msgText: text,
+        auth,
+        sheets,
+        sheetId: GOOGLE_SHEET_ID,
+      });
+    } else if (messageType === "image" && attachmentUrl) {
+      collectorResult = await handleCollectorImage({
+        psid: senderId,
+        attachmentUrl,
+        apiKey: ANTHROPIC_API_KEY,
+      });
+    }
+
+    if (collectorResult?.handled && collectorResult.replyText) {
+      const extraMeta = collectorResult.done
+        ? JSON.stringify({
+            collector: "finalized",
+            customerEmail: collectorResult.customerEmail || "",
+            sheetUrl: collectorResult.sheetUrl || "",
+          })
+        : JSON.stringify({ collector: "in_progress" });
+      await sendAndLog(senderId, collectorResult.replyText, extraMeta);
+      return;
+    }
+
+    // Not handled by collector (e.g., sticker during collection) → just log
+    if (!collectorResult?.handled) {
+      console.log(`[Collector] Not handled · session active but message type ${messageType} ignored`);
+      return;
+    }
+  }
+
+  // ─── Stage 5: Slip verification (image attachments · NOT in collector) ──
   if (messageType === "image" && attachmentUrl) {
     console.log(`[Slip] Image received · trying slip verification`);
     try {
       const slipResult = await verifySlip({ fbAttachmentUrl: attachmentUrl });
 
       if (slipResult.ok) {
-        // ✅ Verified slip — save to BookingHold + reply + email confirmation
-        await saveSlipToBookingHold({
+        // ✅ Verified slip — save to BookingHold (get rowIndex back)
+        const saveResult = await saveSlipToBookingHold({
           sheets,
           spreadsheetId: GOOGLE_SHEET_ID,
           psid: senderId,
           displayName: senderName,
           slipData: slipResult,
         });
+        const rowIndex = saveResult?.rowIndex || null;
 
+        // Reply: slip confirmation
         const replyText = formatSlipReply(slipResult);
         if (replyText) {
-          const sendResult = await sendFbMessage(senderId, replyText);
-          if (sendResult) {
-            await logOutboundRow({
-              customerPsid: senderId,
-              text: replyText,
-              mid: sendResult.mid,
-              extra: JSON.stringify({
-                slip_amount: slipResult.amount,
-                slip_ref: slipResult.ref,
-                slip_branch: slipResult.matchedBranch,
-              }),
-            });
-          }
+          await sendAndLog(
+            senderId,
+            replyText,
+            JSON.stringify({
+              slip_amount: slipResult.amount,
+              slip_ref: slipResult.ref,
+              slip_branch: slipResult.matchedBranch,
+              row_index: rowIndex,
+            })
+          );
         }
 
-        // ─── Stage 6: Fire-and-forget confirmation email ────────────────
-        // ไม่ await · ถ้า fail ก็ไม่ blocking flow · log error ใน promise chain
-        fireEmailConfirmation({ slipResult, senderId, senderName });
+        // ─── Stage 6.5: Start booking-collector ───────────────────────────
+        startNameCollection({
+          psid: senderId,
+          bookingRef: "", // admin fills later · collector uses "(รอ admin)"
+          bookingPersonName: slipResult.senderName || senderName || "",
+          matchedAmount: slipResult.amount,
+          rowIndex,
+          slipData: slipResult,
+        });
+        console.log(`[Collector] Session started for ${senderId} · row=${rowIndex}`);
+
+        // Send kickoff prompt (asks for names + phone + email)
+        await sendAndLog(senderId, COLLECTOR_KICKOFF_PROMPT, JSON.stringify({ collector: "kickoff" }));
 
         return;
       }
@@ -457,33 +518,19 @@ async function handleMessagingEvent(event) {
       // ❌ Slip verification failed
       console.log(`[Slip] Verification failed: ${slipResult.error}`);
 
-      // not_a_slip → not a slip image · skip (don't reply · just log)
       if (slipResult.error === "not_a_slip") {
         console.log(`[Slip] Not a slip image · silent (admin can review via Messages tab)`);
         return;
       }
 
-      // Other errors → reply with appropriate message
       const errorReply = formatSlipReply(slipResult);
       if (errorReply) {
-        const sendResult = await sendFbMessage(senderId, errorReply);
-        if (sendResult) {
-          await logOutboundRow({
-            customerPsid: senderId,
-            text: errorReply,
-            mid: sendResult.mid,
-            extra: JSON.stringify({ slip_error: slipResult.error }),
-          });
-        }
+        await sendAndLog(senderId, errorReply, JSON.stringify({ slip_error: slipResult.error }));
       }
       return;
     } catch (err) {
       console.error("[Slip] Unexpected error:", err.message);
-      const fallback = "ขอเจ้าหน้าที่ช่วยตรวจสอบสลิปให้นะครับ 🙏";
-      const sendResult = await sendFbMessage(senderId, fallback);
-      if (sendResult) {
-        await logOutboundRow({ customerPsid: senderId, text: fallback, mid: sendResult.mid });
-      }
+      await sendAndLog(senderId, "ขอเจ้าหน้าที่ช่วยตรวจสอบสลิปให้นะครับ 🙏");
       return;
     }
   }
@@ -491,7 +538,6 @@ async function handleMessagingEvent(event) {
   // ─── Text-only AI reply (Stages 2-4) ────────────────────────────────────
   if (messageType !== "text" || !text) return;
 
-  // Stage 4: Image matching
   let matchedImages = null;
   if (isImageRequest(text)) {
     matchedImages = matchImages(text);
@@ -502,7 +548,6 @@ async function handleMessagingEvent(event) {
     }
   }
 
-  // Generate AI reply
   try {
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
@@ -533,14 +578,7 @@ async function handleMessagingEvent(event) {
 
     const finalText = lintReply(reply, imagesSent.length > 0);
     if (finalText && finalText.trim()) {
-      const sendResult = await sendFbMessage(senderId, finalText);
-      if (sendResult) {
-        await logOutboundRow({
-          customerPsid: senderId,
-          text: finalText,
-          mid: sendResult.mid,
-        });
-      }
+      await sendAndLog(senderId, finalText);
     }
   } catch (err) {
     console.error("[AI] handleMessagingEvent error:", err.message);
@@ -550,7 +588,9 @@ async function handleMessagingEvent(event) {
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
-  console.log("\n🚀 fb-chat-service v1.6.0 (Stage 6: Email Confirmation · Brevo REST API)");
+  console.log(
+    "\n🚀 fb-chat-service v1.7.0 (Stage 6.5: Booking Collector · LINE Phase 3.6 parity)"
+  );
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -561,11 +601,19 @@ app.listen(PORT, () => {
   console.log("  SHEET_TAB:              ", SHEET_TAB);
   console.log("  TEST_MODE_TAB:          ", TEST_MODE_TAB);
   console.log("  BOT_ENABLED:            ", BOT_ENABLED ? "✅ true" : "🔇 false");
-  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `(fallback) ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "(empty)");
+  console.log(
+    "  ECHO_ENABLED_PSIDS:     ",
+    ECHO_ENABLED_PSIDS.length > 0 ? `(fallback) ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "(empty)"
+  );
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING");
   console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "(default LINE)");
-  console.log("  SLIPOK BRANCHES:        ", slipokBranches.length > 0 ? `✅ ${slipokBranches.length} (${slipokBranches.map((b) => b.name).join(", ")})` : "❌ NONE");
-  console.log("  BREVO_API_KEY:          ", BREVO_API_KEY ? "✅ set" : "⚠️  MISSING (email confirmation disabled)");
-  console.log("  EMAIL_FROM:             ", EMAIL_FROM || "(default: Koh Talu Resort <reservation@taluisland.com>)");
-  console.log("  EMAIL_RESERVATION:      ", EMAIL_RESERVATION ? "✅ set" : "⚠️  MISSING (email confirmation disabled)");
+  console.log(
+    "  SLIPOK BRANCHES:        ",
+    slipokBranches.length > 0
+      ? `✅ ${slipokBranches.length} (${slipokBranches.map((b) => b.name).join(", ")})`
+      : "❌ NONE"
+  );
+  console.log("  BREVO_API_KEY:          ", BREVO_API_KEY ? "✅ set" : "⚠️  MISSING (email disabled)");
+  console.log("  EMAIL_FROM:             ", EMAIL_FROM || "(default)");
+  console.log("  EMAIL_RESERVATION:      ", EMAIL_RESERVATION ? "✅ set" : "⚠️  MISSING (email disabled)");
 });
