@@ -1,9 +1,15 @@
 /**
  * fb-chat-service — Facebook Messenger webhook → Google Sheet logger
- * v1.5.0 Stage 5 · Slip Verification (SlipOK API · multi-branch fallback)
+ * v1.6.0 Stage 6 · Email Confirmation (Brevo REST API)
+ *
+ * What's new vs v1.5.0 (Stage 5):
+ *   - After successful slip verification + BookingHold save → fire-and-forget
+ *     sendBookingConfirmation({ booking, slipData }) to reservation@taluisland.com
+ *   - Email send is non-blocking · errors logged but don't break user reply
+ *   - /health endpoint shows email config status
  *
  * Endpoints:
- *   GET  /                              → health
+ *   GET  /                              → health (now includes email config)
  *   GET  /webhook                       → FB verification (hub.challenge)
  *   POST /webhook                       → รับ messaging events
  *   POST /admin/refresh-testmode-cache  → manual TestMode cache refresh
@@ -15,7 +21,11 @@
  *   ANTHROPIC_API_KEY
  *   SLIPOK_BRANCH_{1,2}_{ID,KEY,NAME}  (Stage 5)
  *
- * ENV optional:
+ * ENV optional (Stage 6 — graceful degrade if missing):
+ *   BREVO_API_KEY        → ถ้าไม่ set บอท skip email (log warn)
+ *   EMAIL_FROM           → default "Koh Talu Resort <reservation@taluisland.com>"
+ *   EMAIL_RESERVATION    → primary recipient (default reservation@taluisland.com)
+ *
  *   BOT_ENABLED (default false)
  *   ECHO_ENABLED_PSIDS (fallback allowlist)
  *   TEST_MODE_TAB (default "TestMode")
@@ -35,6 +45,7 @@ const {
   formatSlipReply,
   loadSlipOKBranches,
 } = require("./slip-verifier");
+const { sendBookingConfirmation } = require("./email-sender");
 
 const app = express();
 
@@ -48,6 +59,10 @@ const GOOGLE_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "
 const SHEET_TAB = process.env.SHEET_TAB || "Messages";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 const TEST_MODE_TAB = process.env.TEST_MODE_TAB || "TestMode";
+
+const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
+const EMAIL_FROM = process.env.EMAIL_FROM || "";
+const EMAIL_RESERVATION = process.env.EMAIL_RESERVATION || "";
 
 const BOT_ENABLED = process.env.BOT_ENABLED === "true";
 const ECHO_ENABLED_PSIDS = (process.env.ECHO_ENABLED_PSIDS || "")
@@ -217,6 +232,30 @@ async function logOutboundImage({ customerPsid, imageUrl, category }) {
   }
 }
 
+// ─── Stage 6: Fire-and-forget email confirmation ───────────────────────────
+function fireEmailConfirmation({ slipResult, senderId, senderName }) {
+  // Build minimal booking object · admin can update bookingRef later in BookingHold
+  const booking = {
+    bookingRef: "", // ยังไม่มี · admin จะกรอกใน BookingHold เมื่อ match กับ booking จริง
+    displayName: senderName || `FB:${senderId.slice(-8)}`,
+    bookingPersonName: slipResult.senderName || "-",
+    customerEmail: "", // FB ไม่ได้ขอ email ตอน slip submit · จะ CC ลูกค้าได้ก็ต่อเมื่อ admin อัปเดต col N
+  };
+
+  // Fire-and-forget · ไม่ block reply
+  sendBookingConfirmation({ booking, slipData: slipResult, customerEmail: "" })
+    .then((result) => {
+      if (result.ok) {
+        console.log(`[Email] ✅ FB confirmation sent · psid=${senderId} · msgId=${result.messageId}`);
+      } else {
+        console.warn(`[Email] ⚠️  FB confirmation failed · psid=${senderId} · error=${result.error}`);
+      }
+    })
+    .catch((err) => {
+      console.error(`[Email] ❌ FB confirmation exception · psid=${senderId} · ${err.message}`);
+    });
+}
+
 // ─── Signature verification ────────────────────────────────────────────────
 function isValidSignature(req) {
   if (!FB_APP_SECRET) return true;
@@ -238,7 +277,8 @@ app.get("/", (_req, res) => {
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.5.0",
+    version: "1.6.0",
+    stage: "Stage 6 · Email Confirmation (Brevo REST API)",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -254,6 +294,9 @@ app.get("/", (_req, res) => {
     fb_app_secret: FB_APP_SECRET ? "✅ set" : "⚠️  optional, missing",
     sheet_id: GOOGLE_SHEET_ID ? "✅ set" : "❌ missing",
     service_account: GOOGLE_SERVICE_ACCOUNT_JSON ? "✅ set" : "❌ missing",
+    email_brevo_api_key: BREVO_API_KEY ? "✅ set" : "⚠️  missing (email disabled)",
+    email_from: EMAIL_FROM ? "✅ set" : "⚠️  default will be used",
+    email_reservation: EMAIL_RESERVATION ? "✅ set" : "⚠️  missing (email disabled)",
   });
 });
 
@@ -378,7 +421,7 @@ async function handleMessagingEvent(event) {
       const slipResult = await verifySlip({ fbAttachmentUrl: attachmentUrl });
 
       if (slipResult.ok) {
-        // ✅ Verified slip — save to BookingHold + reply
+        // ✅ Verified slip — save to BookingHold + reply + email confirmation
         await saveSlipToBookingHold({
           sheets,
           spreadsheetId: GOOGLE_SHEET_ID,
@@ -403,6 +446,11 @@ async function handleMessagingEvent(event) {
             });
           }
         }
+
+        // ─── Stage 6: Fire-and-forget confirmation email ────────────────
+        // ไม่ await · ถ้า fail ก็ไม่ blocking flow · log error ใน promise chain
+        fireEmailConfirmation({ slipResult, senderId, senderName });
+
         return;
       }
 
@@ -502,7 +550,7 @@ async function handleMessagingEvent(event) {
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
-  console.log("\n🚀 fb-chat-service v1.5.0 (Stage 5: Slip verification · SlipOK multi-branch)");
+  console.log("\n🚀 fb-chat-service v1.6.0 (Stage 6: Email Confirmation · Brevo REST API)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -517,4 +565,7 @@ app.listen(PORT, () => {
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING");
   console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "(default LINE)");
   console.log("  SLIPOK BRANCHES:        ", slipokBranches.length > 0 ? `✅ ${slipokBranches.length} (${slipokBranches.map((b) => b.name).join(", ")})` : "❌ NONE");
+  console.log("  BREVO_API_KEY:          ", BREVO_API_KEY ? "✅ set" : "⚠️  MISSING (email confirmation disabled)");
+  console.log("  EMAIL_FROM:             ", EMAIL_FROM || "(default: Koh Talu Resort <reservation@taluisland.com>)");
+  console.log("  EMAIL_RESERVATION:      ", EMAIL_RESERVATION ? "✅ set" : "⚠️  MISSING (email confirmation disabled)");
 });
