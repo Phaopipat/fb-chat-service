@@ -1,38 +1,21 @@
 /**
- * fb-chat-service — Facebook Messenger webhook → Google Sheet logger
- * v1.7.3 Stage 6.5 · Booking Collector (Names + Phone + Email · LINE Phase 3.6 parity)
+ * fb-chat-service — Facebook Messenger webhook
+ * v1.8.0 Stage 6.6 · LINE group escalation (admin alerts pushed to LINE group)
  *
- * What's new vs v1.6.0 (Stage 6):
- *   - After slip verified → start booking-collector session (asks for names + phone + email)
- *   - Email send moved INTO collector._finalize() → CC ลูกค้าได้ทันทีเมื่อ email collected
- *   - Booking-collector takes priority over AI reply when isCollecting(psid)
- *   - Image attachments during collection → Claude vision OCR for ID card / passport
- *   - Drive traveler sheet auto-created when names provided
- *   - BookingHold col N (customerEmail) auto-filled from chat
+ * What's new vs v1.7.3 (Stage 6.5):
+ *   - LINE group notifier wired in 3 places:
+ *     a) After slip verified → notifySlipVerified (admin sees slip immediately)
+ *     b) After booking-collector finalize → notifyBookingNamesCollected (admin sees full booking)
+ *     c) On sensitive keyword detection → notifySensitiveKeyword (admin sees flagged customer messages)
+ *   - All notifications are fire-and-forget · don't block customer reply
+ *   - Dedupe 5-min rolling window keyed by reason:psid (no spam)
+ *   - PII redact: phone 08X-XXX-XXXX · ref last-4 only
  *
- * Flow:
- *   1. Customer sends slip image
- *   2. Bot: verifies slip + saves to BookingHold (returns rowIndex)
- *   3. Bot: replies "ตรวจสลิปสำเร็จครับ ✅..."
- *   4. Bot: startNameCollection({ psid, rowIndex, slipData, ... })
- *   5. Bot: sends "ขอรายชื่อสมาชิก + เบอร์ + email (ถ้ามี)" prompt
- *   6. Customer: replies with names + phone + (optional email)
- *   7. Bot: parses fields → if missing phone, ask for phone; else finalize
- *   8. Finalize: write col N · create Drive sheet · send Brevo email (with CC if email)
- *   9. Bot: sends summary + sheet link to customer
+ * New ENV (optional · graceful degrade if missing):
+ *   LINE_PUSH_TOKEN  — Channel Access Token of LINE OA that owns the admin group
+ *   LINE_GROUP_ID    — Target admin group ID
  *
- * ENV required:
- *   FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN, FB_APP_SECRET
- *   GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON  (must include drive scope)
- *   ANTHROPIC_API_KEY
- *   SLIPOK_BRANCH_{1,2}_{ID,KEY,NAME}
- *   BREVO_API_KEY, EMAIL_FROM, EMAIL_RESERVATION
- *
- * ENV optional:
- *   BOT_ENABLED (default false)
- *   ECHO_ENABLED_PSIDS (fallback allowlist)
- *   TEST_MODE_TAB (default "TestMode")
- *   IMAGE_HOST (default https://webhook-kohtalu-production.up.railway.app)
+ * Without those env vars: bot still works · just no LINE group notifications.
  */
 
 const express = require("express");
@@ -55,6 +38,13 @@ const {
   handleCollectorText,
   handleCollectorImage,
 } = require("./booking-collector");
+const {
+  notifySlipVerified,
+  notifyBookingNamesCollected,
+  notifySensitiveKeyword,
+  detectSensitiveKeyword,
+  getConfigStatus: getNotifierStatus,
+} = require("./line-group-notifier");
 
 const app = express();
 
@@ -72,6 +62,9 @@ const TEST_MODE_TAB = process.env.TEST_MODE_TAB || "TestMode";
 const BREVO_API_KEY = process.env.BREVO_API_KEY || "";
 const EMAIL_FROM = process.env.EMAIL_FROM || "";
 const EMAIL_RESERVATION = process.env.EMAIL_RESERVATION || "";
+
+const LINE_PUSH_TOKEN = process.env.LINE_PUSH_TOKEN || "";
+const LINE_GROUP_ID = process.env.LINE_GROUP_ID || "";
 
 const BOT_ENABLED = process.env.BOT_ENABLED === "true";
 const ECHO_ENABLED_PSIDS = (process.env.ECHO_ENABLED_PSIDS || "")
@@ -250,7 +243,6 @@ async function logOutboundImage({ customerPsid, imageUrl, category }) {
   }
 }
 
-// ─── Send helper: text + log ───────────────────────────────────────────────
 async function sendAndLog(psid, text, extra = "") {
   const sendResult = await sendFbMessage(psid, text);
   if (sendResult) {
@@ -285,11 +277,12 @@ function isValidSignature(req) {
 app.get("/", (_req, res) => {
   const cacheStatus = getCacheStatus();
   const slipokBranches = loadSlipOKBranches();
+  const notifierStatus = getNotifierStatus();
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.7.0",
-    stage: "Stage 6.5 · Booking Collector + Travelers tab (v1.7.3)",
+    version: "1.8.0",
+    stage: "Stage 6.6 · LINE group escalation (admin alerts to LINE group)",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -308,6 +301,9 @@ app.get("/", (_req, res) => {
     email_brevo_api_key: BREVO_API_KEY ? "✅ set" : "⚠️  missing (email disabled)",
     email_from: EMAIL_FROM ? "✅ set" : "⚠️  default will be used",
     email_reservation: EMAIL_RESERVATION ? "✅ set" : "⚠️  missing (email disabled)",
+    line_push_token: notifierStatus.line_push_token,
+    line_group_id: notifierStatus.line_group_id,
+    line_dedupe_cache_size: notifierStatus.dedupe_cache_size,
   });
 });
 
@@ -390,7 +386,6 @@ async function handleMessagingEvent(event) {
     `[${date} ${time}] inbound ${senderId} (${senderName}) ${messageType}: ${text || "(attachment)"}`
   );
 
-  // Log inbound row
   await appendRow([
     ts.toISOString(),
     date,
@@ -404,13 +399,11 @@ async function handleMessagingEvent(event) {
     "inbound",
   ]);
 
-  // ─── Master kill switch ──────────────────────────────────────────────────
   if (!BOT_ENABLED) {
     console.log(`[Bot] Skipped — BOT_ENABLED=false`);
     return;
   }
 
-  // ─── TestMode allowlist ───────────────────────────────────────────────────
   const sheets = await getSheets();
   const auth = await getGoogleAuth();
   const allowed = await isAllowed({
@@ -424,6 +417,21 @@ async function handleMessagingEvent(event) {
   if (!allowed) {
     console.log(`[Bot] Skipped — ${senderId} not in TestMode (active)`);
     return;
+  }
+
+  // ─── Stage 6.6: Sensitive keyword detection (TEXT messages only) ────────
+  // Fire-and-forget · doesn't block AI reply or collector flow
+  if (messageType === "text" && text) {
+    const reason = detectSensitiveKeyword(text);
+    if (reason) {
+      console.log(`[Group] Sensitive keyword detected: ${reason} (psid=${senderId})`);
+      notifySensitiveKeyword({
+        senderName,
+        psid: senderId,
+        customerMessage: text,
+        reason,
+      }).catch((err) => console.warn("[Group] Notify error:", err.message));
+    }
   }
 
   // ─── Stage 6.5: Booking-collector takes priority if in session ──────────
@@ -452,14 +460,21 @@ async function handleMessagingEvent(event) {
         ? JSON.stringify({
             collector: "finalized",
             customerEmail: collectorResult.customerEmail || "",
-            sheetUrl: collectorResult.sheetUrl || "",
           })
         : JSON.stringify({ collector: "in_progress" });
       await sendAndLog(senderId, collectorResult.replyText, extraMeta);
+
+      // ─── Stage 6.6: On collector finalize → notify LINE group ───────────
+      if (collectorResult.done && collectorResult.notifyData) {
+        notifyBookingNamesCollected({
+          senderName,
+          psid: senderId,
+          ...collectorResult.notifyData,
+        }).catch((err) => console.warn("[Group] Notify error:", err.message));
+      }
       return;
     }
 
-    // Not handled by collector (e.g., sticker during collection) → just log
     if (!collectorResult?.handled) {
       console.log(`[Collector] Not handled · session active but message type ${messageType} ignored`);
       return;
@@ -473,7 +488,6 @@ async function handleMessagingEvent(event) {
       const slipResult = await verifySlip({ fbAttachmentUrl: attachmentUrl });
 
       if (slipResult.ok) {
-        // ✅ Verified slip — save to BookingHold (get rowIndex back)
         const saveResult = await saveSlipToBookingHold({
           sheets,
           spreadsheetId: GOOGLE_SHEET_ID,
@@ -483,7 +497,6 @@ async function handleMessagingEvent(event) {
         });
         const rowIndex = saveResult?.rowIndex || null;
 
-        // Reply: slip confirmation
         const replyText = formatSlipReply(slipResult);
         if (replyText) {
           await sendAndLog(
@@ -498,10 +511,18 @@ async function handleMessagingEvent(event) {
           );
         }
 
-        // ─── Stage 6.5: Start booking-collector ───────────────────────────
+        // ─── Stage 6.6: Notify LINE group about verified slip ─────────────
+        notifySlipVerified({
+          senderName,
+          psid: senderId,
+          amount: slipResult.amount,
+          ref: slipResult.ref,
+          branch: slipResult.matchedBranch,
+        }).catch((err) => console.warn("[Group] Notify error:", err.message));
+
         startNameCollection({
           psid: senderId,
-          bookingRef: "", // admin fills later · collector uses "(รอ admin)"
+          bookingRef: "",
           bookingPersonName: slipResult.senderName || senderName || "",
           matchedAmount: slipResult.amount,
           rowIndex,
@@ -509,13 +530,10 @@ async function handleMessagingEvent(event) {
         });
         console.log(`[Collector] Session started for ${senderId} · row=${rowIndex}`);
 
-        // Send kickoff prompt (asks for names + phone + email)
         await sendAndLog(senderId, COLLECTOR_KICKOFF_PROMPT, JSON.stringify({ collector: "kickoff" }));
-
         return;
       }
 
-      // ❌ Slip verification failed
       console.log(`[Slip] Verification failed: ${slipResult.error}`);
 
       if (slipResult.error === "not_a_slip") {
@@ -589,7 +607,7 @@ async function handleMessagingEvent(event) {
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
   console.log(
-    "\n🚀 fb-chat-service v1.7.3 (Stage 6.5: Booking Collector · LINE Phase 3.6 parity)"
+    "\n🚀 fb-chat-service v1.8.0 (Stage 6.6: LINE group escalation · admin alerts to LINE)"
   );
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
@@ -616,4 +634,6 @@ app.listen(PORT, () => {
   console.log("  BREVO_API_KEY:          ", BREVO_API_KEY ? "✅ set" : "⚠️  MISSING (email disabled)");
   console.log("  EMAIL_FROM:             ", EMAIL_FROM || "(default)");
   console.log("  EMAIL_RESERVATION:      ", EMAIL_RESERVATION ? "✅ set" : "⚠️  MISSING (email disabled)");
+  console.log("  LINE_PUSH_TOKEN:        ", LINE_PUSH_TOKEN ? "✅ set" : "⚠️  MISSING (LINE group notifications disabled)");
+  console.log("  LINE_GROUP_ID:          ", LINE_GROUP_ID ? "✅ set" : "⚠️  MISSING (LINE group notifications disabled)");
 });
