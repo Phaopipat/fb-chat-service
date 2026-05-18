@@ -1,21 +1,23 @@
 /**
  * fb-chat-service — Facebook Messenger webhook → Google Sheet logger
- * v1.4.0 Stage 4 · Adds image delivery (Lite map · LINE host) + image-lint
+ * v1.5.0 Stage 5 · Slip Verification (SlipOK API · multi-branch fallback)
  *
  * Endpoints:
- *   GET  /                           → health
- *   GET  /webhook                    → FB verification (hub.challenge)
- *   POST /webhook                    → รับ messaging events
- *   POST /admin/refresh-testmode-cache → manual TestMode cache refresh
+ *   GET  /                              → health
+ *   GET  /webhook                       → FB verification (hub.challenge)
+ *   POST /webhook                       → รับ messaging events
+ *   POST /admin/refresh-testmode-cache  → manual TestMode cache refresh
+ *   GET  /admin/slipok-quotas           → check SlipOK quota for each branch
  *
  * ENV required:
  *   FB_VERIFY_TOKEN, FB_PAGE_ACCESS_TOKEN, FB_APP_SECRET
  *   GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_JSON
  *   ANTHROPIC_API_KEY
+ *   SLIPOK_BRANCH_{1,2}_{ID,KEY,NAME}  (Stage 5)
  *
  * ENV optional:
- *   BOT_ENABLED (default true)
- *   ECHO_ENABLED_PSIDS (fallback allowlist if Sheet read fail)
+ *   BOT_ENABLED (default false)
+ *   ECHO_ENABLED_PSIDS (fallback allowlist)
  *   TEST_MODE_TAB (default "TestMode")
  *   IMAGE_HOST (default https://webhook-kohtalu-production.up.railway.app)
  */
@@ -27,6 +29,12 @@ const { generateReply } = require("./ai-reply");
 const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 const { isImageRequest, matchImages } = require("./image-map");
 const { lintReply } = require("./image-lint");
+const {
+  verifySlip,
+  saveSlipToBookingHold,
+  formatSlipReply,
+  loadSlipOKBranches,
+} = require("./slip-verifier");
 
 const app = express();
 
@@ -100,12 +108,9 @@ async function getSenderName(senderId) {
   }
 }
 
-// ─── Send API (text) ───────────────────────────────────────────────────────
+// ─── Send API ──────────────────────────────────────────────────────────────
 async function sendFbMessage(psid, text) {
-  if (!FB_PAGE_ACCESS_TOKEN) {
-    console.warn("[Send] FB_PAGE_ACCESS_TOKEN missing — skip send");
-    return null;
-  }
+  if (!FB_PAGE_ACCESS_TOKEN) return null;
   if (!psid || !text) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
@@ -132,12 +137,8 @@ async function sendFbMessage(psid, text) {
   }
 }
 
-// ─── Send API (image attachment) — Stage 4 NEW ─────────────────────────────
 async function sendFbImage(psid, imageUrl) {
-  if (!FB_PAGE_ACCESS_TOKEN) {
-    console.warn("[SendImage] FB_PAGE_ACCESS_TOKEN missing — skip");
-    return null;
-  }
+  if (!FB_PAGE_ACCESS_TOKEN) return null;
   if (!psid || !imageUrl) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
@@ -148,10 +149,7 @@ async function sendFbImage(psid, imageUrl) {
         recipient: { id: psid },
         messaging_type: "RESPONSE",
         message: {
-          attachment: {
-            type: "image",
-            payload: { url: imageUrl, is_reusable: true },
-          },
+          attachment: { type: "image", payload: { url: imageUrl, is_reusable: true } },
         },
       }),
     });
@@ -168,19 +166,17 @@ async function sendFbImage(psid, imageUrl) {
   }
 }
 
-// ─── Send multiple images sequentially (with small delay) ──────────────────
 async function sendFbImages(psid, imageUrls) {
   const sent = [];
   for (const url of imageUrls) {
     const r = await sendFbImage(psid, url);
     if (r) sent.push(url);
-    // small delay เพื่อรักษาลำดับ (FB API ส่ง async บางครั้งสลับลำดับ)
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return sent;
 }
 
-// ─── Log row helpers ───────────────────────────────────────────────────────
+// ─── Log helpers ───────────────────────────────────────────────────────────
 async function logOutboundRow({ customerPsid, text, mid, extra = "" }) {
   try {
     const ts = new Date();
@@ -227,8 +223,7 @@ function isValidSignature(req) {
   const sig = req.get("x-hub-signature-256");
   if (!sig) return false;
   const expected =
-    "sha256=" +
-    crypto.createHmac("sha256", FB_APP_SECRET).update(req.rawBody).digest("hex");
+    "sha256=" + crypto.createHmac("sha256", FB_APP_SECRET).update(req.rawBody).digest("hex");
   try {
     return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
   } catch {
@@ -239,10 +234,11 @@ function isValidSignature(req) {
 // ─── Routes ────────────────────────────────────────────────────────────────
 app.get("/", (_req, res) => {
   const cacheStatus = getCacheStatus();
+  const slipokBranches = loadSlipOKBranches();
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.4.1",
+    version: "1.5.0",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -250,6 +246,8 @@ app.get("/", (_req, res) => {
     test_mode_fetch_errored: cacheStatus.fetchErrored,
     echo_allowlist_fallback_count: ECHO_ENABLED_PSIDS.length,
     image_host: process.env.IMAGE_HOST || "https://webhook-kohtalu-production.up.railway.app",
+    slipok_branches_configured: slipokBranches.length,
+    slipok_branches: slipokBranches.map((b) => b.name),
     anthropic_api_key: ANTHROPIC_API_KEY ? "✅ set" : "❌ missing",
     fb_verify_token: FB_VERIFY_TOKEN ? "✅ set" : "❌ missing",
     fb_page_token: FB_PAGE_ACCESS_TOKEN ? "✅ set" : "❌ missing",
@@ -269,24 +267,19 @@ app.get("/webhook", (req, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
   if (mode === "subscribe" && token === FB_VERIFY_TOKEN) {
-    console.log("✅ Webhook verified by Meta");
     return res.status(200).send(challenge);
   }
-  console.warn("❌ Webhook verification failed:", { mode, tokenMatch: token === FB_VERIFY_TOKEN });
   return res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
-
   if (!isValidSignature(req)) {
-    console.warn("❌ Invalid x-hub-signature-256 — ignoring payload");
+    console.warn("❌ Invalid signature");
     return;
   }
-
   const body = req.body;
   if (body.object !== "page") return;
-
   for (const entry of body.entry || []) {
     for (const event of entry.messaging || []) {
       try {
@@ -303,7 +296,6 @@ async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
   if (!senderId) return;
 
-  // Skip is_echo (we log outbound ourselves)
   const isEcho = event.message?.is_echo === true;
   if (isEcho) {
     console.log("[Webhook] Skipping is_echo event");
@@ -319,14 +311,17 @@ async function handleMessagingEvent(event) {
   let messageType = "unknown";
   let text = "";
   let extra = "";
+  let attachmentUrl = "";
 
   if (event.message) {
     if (event.message.text) {
       messageType = "text";
       text = event.message.text;
     } else if (event.message.attachments?.length) {
-      messageType = event.message.attachments[0].type;
-      extra = JSON.stringify(event.message.attachments[0].payload || {});
+      const att = event.message.attachments[0];
+      messageType = att.type; // image, audio, video, file, location, fallback
+      extra = JSON.stringify(att.payload || {});
+      attachmentUrl = att.payload?.url || "";
     } else if (event.message.sticker_id) {
       messageType = "sticker";
       extra = String(event.message.sticker_id);
@@ -339,9 +334,9 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  console.log(`[${date} ${time}] inbound ${senderId} (${senderName}) ${messageType}: ${text}`);
+  console.log(`[${date} ${time}] inbound ${senderId} (${senderName}) ${messageType}: ${text || "(attachment)"}`);
 
-  // Log inbound row
+  // Log inbound row (ทุก message)
   await appendRow([
     ts.toISOString(),
     date,
@@ -355,15 +350,13 @@ async function handleMessagingEvent(event) {
     "inbound",
   ]);
 
-  if (messageType !== "text" || !text) return;
-
-  // ─── Stage 1.5: master kill ──────────────────────────────────────────────
+  // ─── Master kill switch ──────────────────────────────────────────────────
   if (!BOT_ENABLED) {
-    console.log(`[AI] Skipped — BOT_ENABLED=false (silent mode)`);
+    console.log(`[Bot] Skipped — BOT_ENABLED=false`);
     return;
   }
 
-  // ─── Stage 3: allowlist via TestMode tab ────────────────────────────────
+  // ─── TestMode allowlist ───────────────────────────────────────────────────
   const sheets = await getSheets();
   const allowed = await isAllowed({
     psid: senderId,
@@ -374,11 +367,83 @@ async function handleMessagingEvent(event) {
   });
 
   if (!allowed) {
-    console.log(`[AI] Skipped — ${senderId} not in TestMode (active)`);
+    console.log(`[Bot] Skipped — ${senderId} not in TestMode (active)`);
     return;
   }
 
-  // ─── Stage 4: Image matching ─────────────────────────────────────────────
+  // ─── Stage 5: Slip verification (image attachments) ─────────────────────
+  if (messageType === "image" && attachmentUrl) {
+    console.log(`[Slip] Image received · trying slip verification`);
+    try {
+      const slipResult = await verifySlip({ fbAttachmentUrl: attachmentUrl });
+
+      if (slipResult.ok) {
+        // ✅ Verified slip — save to BookingHold + reply
+        await saveSlipToBookingHold({
+          sheets,
+          spreadsheetId: GOOGLE_SHEET_ID,
+          psid: senderId,
+          displayName: senderName,
+          slipData: slipResult,
+        });
+
+        const replyText = formatSlipReply(slipResult);
+        if (replyText) {
+          const sendResult = await sendFbMessage(senderId, replyText);
+          if (sendResult) {
+            await logOutboundRow({
+              customerPsid: senderId,
+              text: replyText,
+              mid: sendResult.mid,
+              extra: JSON.stringify({
+                slip_amount: slipResult.amount,
+                slip_ref: slipResult.ref,
+                slip_branch: slipResult.matchedBranch,
+              }),
+            });
+          }
+        }
+        return;
+      }
+
+      // ❌ Slip verification failed
+      console.log(`[Slip] Verification failed: ${slipResult.error}`);
+
+      // not_a_slip → not a slip image · skip (don't reply · just log)
+      if (slipResult.error === "not_a_slip") {
+        console.log(`[Slip] Not a slip image · silent (admin can review via Messages tab)`);
+        return;
+      }
+
+      // Other errors → reply with appropriate message
+      const errorReply = formatSlipReply(slipResult);
+      if (errorReply) {
+        const sendResult = await sendFbMessage(senderId, errorReply);
+        if (sendResult) {
+          await logOutboundRow({
+            customerPsid: senderId,
+            text: errorReply,
+            mid: sendResult.mid,
+            extra: JSON.stringify({ slip_error: slipResult.error }),
+          });
+        }
+      }
+      return;
+    } catch (err) {
+      console.error("[Slip] Unexpected error:", err.message);
+      const fallback = "ขอเจ้าหน้าที่ช่วยตรวจสอบสลิปให้นะครับ 🙏";
+      const sendResult = await sendFbMessage(senderId, fallback);
+      if (sendResult) {
+        await logOutboundRow({ customerPsid: senderId, text: fallback, mid: sendResult.mid });
+      }
+      return;
+    }
+  }
+
+  // ─── Text-only AI reply (Stages 2-4) ────────────────────────────────────
+  if (messageType !== "text" || !text) return;
+
+  // Stage 4: Image matching
   let matchedImages = null;
   if (isImageRequest(text)) {
     matchedImages = matchImages(text);
@@ -389,7 +454,7 @@ async function handleMessagingEvent(event) {
     }
   }
 
-  // ─── Generate AI reply ───────────────────────────────────────────────────
+  // Generate AI reply
   try {
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
@@ -402,15 +467,13 @@ async function handleMessagingEvent(event) {
     });
 
     if (!reply) {
-      console.warn("[AI] No reply generated — silent");
+      console.warn("[AI] No reply generated");
       return;
     }
 
-    // ─── Send images FIRST (if matched) — better UX in Messenger ────────────
     let imagesSent = [];
     if (matchedImages?.urls?.length) {
       imagesSent = await sendFbImages(senderId, matchedImages.urls);
-      // Log each image row to Sheet
       for (const url of imagesSent) {
         await logOutboundImage({
           customerPsid: senderId,
@@ -420,9 +483,7 @@ async function handleMessagingEvent(event) {
       }
     }
 
-    // ─── Lint reply text · strip false image claims if no images sent ───────
     const finalText = lintReply(reply, imagesSent.length > 0);
-
     if (finalText && finalText.trim()) {
       const sendResult = await sendFbMessage(senderId, finalText);
       if (sendResult) {
@@ -440,7 +501,8 @@ async function handleMessagingEvent(event) {
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log("\n🚀 fb-chat-service v1.4.1 (Stage 4: Image delivery · LINE host · image-lint)");
+  const slipokBranches = loadSlipOKBranches();
+  console.log("\n🚀 fb-chat-service v1.5.0 (Stage 5: Slip verification · SlipOK multi-branch)");
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
   console.log("  FB_VERIFY_TOKEN:        ", FB_VERIFY_TOKEN ? "✅ set" : "❌ MISSING");
@@ -451,7 +513,8 @@ app.listen(PORT, () => {
   console.log("  SHEET_TAB:              ", SHEET_TAB);
   console.log("  TEST_MODE_TAB:          ", TEST_MODE_TAB);
   console.log("  BOT_ENABLED:            ", BOT_ENABLED ? "✅ true" : "🔇 false");
-  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `(fallback) ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "(empty fallback)");
+  console.log("  ECHO_ENABLED_PSIDS:     ", ECHO_ENABLED_PSIDS.length > 0 ? `(fallback) ${ECHO_ENABLED_PSIDS.length} PSID(s)` : "(empty)");
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING");
-  console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "https://webhook-kohtalu-production.up.railway.app (default)");
+  console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "(default LINE)");
+  console.log("  SLIPOK BRANCHES:        ", slipokBranches.length > 0 ? `✅ ${slipokBranches.length} (${slipokBranches.map((b) => b.name).join(", ")})` : "❌ NONE");
 });
