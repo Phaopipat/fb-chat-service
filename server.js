@@ -1,6 +1,6 @@
 /**
  * fb-chat-service — Facebook Messenger webhook → Google Sheet logger
- * v1.7.2 Stage 6.5 · Booking Collector (Names + Phone + Email · LINE Phase 3.6 parity)
+ * v1.7.3 Stage 6.5 · Booking Collector (Names + Phone + Email · LINE Phase 3.6 parity)
  *
  * What's new vs v1.6.0 (Stage 6):
  *   - After slip verified → start booking-collector session (asks for names + phone + email)
@@ -289,7 +289,7 @@ app.get("/", (_req, res) => {
     service: "fb-chat-service",
     status: "ok",
     version: "1.7.0",
-    stage: "Stage 6.5 · Booking Collector + Travelers tab (v1.7.2)",
+    stage: "Stage 6.5 · Booking Collector + Travelers tab (v1.7.3)",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -589,7 +589,7 @@ async function handleMessagingEvent(event) {
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
   console.log(
-    "\n🚀 fb-chat-service v1.7.2 (Stage 6.5: Booking Collector · LINE Phase 3.6 parity)"
+    "\n🚀 fb-chat-service v1.7.3 (Stage 6.5: Booking Collector · LINE Phase 3.6 parity)"
   );
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");

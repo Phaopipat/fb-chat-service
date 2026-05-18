@@ -286,10 +286,12 @@ async function appendTravelersTab({
   ]);
 
   try {
+    // v1.7.3: Use RAW to preserve leading zeros in phone numbers + long psid digits
+    // (USER_ENTERED auto-converts "0812345678" → 812345678 number, strips leading 0)
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
       range: "Travelers!A:J",
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: "RAW",
       requestBody: { values: rows },
     });
     console.log(`[collector] Travelers tab appended ${rows.length} row(s) for psid=${psid}`);
