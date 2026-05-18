@@ -171,65 +171,79 @@ async function createTravelerSheet(auth, { bookingRef, bookingPersonName, names,
 
   const title = `${bookingPersonName || "booking"}_${bookingRef || "FB"}_รายชื่อ`;
 
-  const headerRow = {
-    values: [
-      { userEnteredValue: { stringValue: "No." } },
-      { userEnteredValue: { stringValue: "ชื่อ-นามสกุล" } },
-    ],
-  };
-  const nameRows = names.map((name, i) => ({
+  // v1.7.1: Find target folder FIRST. Service account has no storage quota in
+  // "My Drive" — so we must create the spreadsheet directly in user-shared folder
+  // via Drive API (with parents) instead of Sheets API (creates in SA root).
+  const folderId = await findOrCreateFolder(driveApi, "KohTalu-Bookings");
+  if (!folderId) {
+    throw new Error("KohTalu-Bookings folder not found and could not be created");
+  }
+
+  // Step 1: Create empty spreadsheet inside target folder using Drive API
+  const driveCreateRes = await driveApi.files.create({
+    requestBody: {
+      name: title,
+      mimeType: "application/vnd.google-apps.spreadsheet",
+      parents: [folderId],
+    },
+    fields: "id, webViewLink",
+  });
+  const fileId = driveCreateRes.data.id;
+  const fileUrl = driveCreateRes.data.webViewLink;
+
+  // Step 2: Populate via Sheets API (batchUpdate with rows)
+  const nameRowValues = names.map((name, i) => ({
     values: [
       { userEnteredValue: { numberValue: i + 1 } },
       { userEnteredValue: { stringValue: name } },
     ],
   }));
-  const phoneRow = {
-    values: [
-      { userEnteredValue: { stringValue: "" } },
-      { userEnteredValue: { stringValue: `เบอร์โทร: ${phone}` } },
-    ],
-  };
-  const emailRow = customerEmail
-    ? {
-        values: [
-          { userEnteredValue: { stringValue: "" } },
-          { userEnteredValue: { stringValue: `Email: ${customerEmail}` } },
-        ],
-      }
-    : null;
+  const rowData = [
+    {
+      values: [
+        { userEnteredValue: { stringValue: "No." } },
+        { userEnteredValue: { stringValue: "ชื่อ-นามสกุล" } },
+      ],
+    },
+    ...nameRowValues,
+    {
+      values: [
+        { userEnteredValue: { stringValue: "" } },
+        { userEnteredValue: { stringValue: `เบอร์โทร: ${phone}` } },
+      ],
+    },
+  ];
+  if (customerEmail) {
+    rowData.push({
+      values: [
+        { userEnteredValue: { stringValue: "" } },
+        { userEnteredValue: { stringValue: `Email: ${customerEmail}` } },
+      ],
+    });
+  }
 
-  const dataRows = [headerRow, ...nameRows, phoneRow];
-  if (emailRow) dataRows.push(emailRow);
-
-  const ssRes = await sheetsApi.spreadsheets.create({
+  await sheetsApi.spreadsheets.batchUpdate({
+    spreadsheetId: fileId,
     requestBody: {
-      properties: { title },
-      sheets: [
+      requests: [
         {
-          properties: { title: "รายชื่อ" },
-          data: [{ startRow: 0, startColumn: 0, rowData: dataRows }],
+          updateCells: {
+            start: { sheetId: 0, rowIndex: 0, columnIndex: 0 },
+            rows: rowData,
+            fields: "userEnteredValue",
+          },
         },
       ],
     },
-    fields: "spreadsheetId,spreadsheetUrl",
   });
 
-  const fileId = ssRes.data.spreadsheetId;
-  const fileUrl = ssRes.data.spreadsheetUrl;
-
+  // Step 3: Share anyone-with-link reader
   await driveApi.permissions.create({
     fileId,
     requestBody: { type: "anyone", role: "reader" },
   });
 
-  const folderId = await findOrCreateFolder(driveApi, "KohTalu-Bookings");
-  await driveApi.files.update({
-    fileId,
-    addParents: folderId,
-    removeParents: "root",
-    fields: "id, parents",
-  });
-
+  console.log(`[collector] Drive sheet created in KohTalu-Bookings · ${fileUrl}`);
   return fileUrl;
 }
 
