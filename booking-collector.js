@@ -247,6 +247,59 @@ async function createTravelerSheet(auth, { bookingRef, bookingPersonName, names,
   return fileUrl;
 }
 
+// ─── Append travelers to Travelers tab (one row per name) ──────────────────
+// v1.7.2: Replaces Drive sheet creation (which fails on SA quota).
+// Uses Sheets API instead — no quota issue · same Sheet as BookingHold.
+async function appendTravelersTab({
+  sheets,
+  sheetId,
+  psid,
+  bookingRef,
+  bookingPersonName,
+  names,
+  phone,
+  email,
+  matchedAmount,
+  source = "FB",
+}) {
+  if (!sheets || !sheetId || !names || names.length === 0) {
+    return { ok: false, count: 0 };
+  }
+
+  // Bangkok-time createdAt
+  const createdAt = new Date(Date.now() + 7 * 3600000)
+    .toISOString()
+    .replace("T", " ")
+    .substring(0, 19);
+
+  const rows = names.map((name) => [
+    createdAt,                              // A: createdAt
+    psid,                                   // B: psid
+    bookingRef || "",                       // C: bookingRef
+    bookingPersonName || "",                // D: bookingPersonName
+    name,                                   // E: travelerName
+    phone || "",                            // F: phone
+    email || "",                            // G: email
+    matchedAmount != null ? String(matchedAmount) : "",  // H: matchedAmount
+    source,                                 // I: source (FB / LINE / TikTok)
+    "",                                     // J: notes
+  ]);
+
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: sheetId,
+      range: "Travelers!A:J",
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: rows },
+    });
+    console.log(`[collector] Travelers tab appended ${rows.length} row(s) for psid=${psid}`);
+    return { ok: true, count: rows.length };
+  } catch (err) {
+    console.error("[collector] Travelers append error:", err.message);
+    return { ok: false, count: 0, error: err.message };
+  }
+}
+
 // ─── Write customerEmail to BookingHold col N ───────────────────────────────
 async function updateBookingHoldEmail({ sheets, sheetId, rowIndex, email }) {
   if (!sheets || !sheetId || !rowIndex || !email) return;
@@ -286,27 +339,32 @@ function formatBookingSummary({
   ].join("\n");
 }
 
-// ─── Finalize: write col N, create sheet, send email, build summary ──────────
+// ─── Finalize: write col N, append Travelers, send email, build summary ─────
+// v1.7.2: Drive sheet creation replaced by appendTravelersTab (Sheets API).
+//   Drive sheet failed on SA storage quota · Travelers tab uses Sheets API
+//   which is quota-free for SA → reliable + admin reads in same Sheet
 async function _finalize(psid, s, auth, sheets, sheetId) {
   // 1. Write customerEmail to BookingHold col N (if email collected)
   if (s.customerEmail && s.rowIndex) {
     await updateBookingHoldEmail({ sheets, sheetId, rowIndex: s.rowIndex, email: s.customerEmail });
   }
 
-  // 2. Create traveler list Drive sheet
-  let sheetUrl = null;
-  if (auth && s.names.length > 0) {
-    try {
-      sheetUrl = await createTravelerSheet(auth, {
-        bookingRef: s.bookingRef,
-        bookingPersonName: s.bookingPersonName,
-        names: s.names,
-        phone: s.phone,
-        customerEmail: s.customerEmail,
-      });
-    } catch (err) {
-      console.error("[collector] Drive sheet error:", err.message);
-    }
+  // 2. Append travelers to Travelers tab (1 row per name)
+  let travelersAppended = 0;
+  if (sheets && sheetId && s.names.length > 0) {
+    const r = await appendTravelersTab({
+      sheets,
+      sheetId,
+      psid,
+      bookingRef: s.bookingRef,
+      bookingPersonName: s.bookingPersonName,
+      names: s.names,
+      phone: s.phone,
+      email: s.customerEmail,
+      matchedAmount: s.matchedAmount,
+      source: "FB",
+    });
+    travelersAppended = r.count || 0;
   }
 
   // 3. Send confirmation email (fire-and-forget · with CC if email collected)
@@ -334,7 +392,9 @@ async function _finalize(psid, s, auth, sheets, sheetId) {
   });
 
   const replyParts = [`ขอบคุณครับ ✅ ได้รับข้อมูลครบแล้วครับ 🙏`, ``, summary];
-  if (sheetUrl) replyParts.push(`\n📎 ไฟล์รายชื่อ: ${sheetUrl}`);
+  if (travelersAppended > 0) {
+    replyParts.push(`\n📋 บันทึก ${travelersAppended} ท่านลงระบบแล้วครับ`);
+  }
   if (s.customerEmail) {
     replyParts.push(`\n📧 ส่ง confirmation email ไปที่ ${s.customerEmail} แล้วครับ`);
   } else {
@@ -348,8 +408,8 @@ async function _finalize(psid, s, auth, sheets, sheetId) {
     handled: true,
     done: true,
     replyText: customerReply,
-    adminSummary: summary + (sheetUrl ? `\n\n📎 ไฟล์รายชื่อ: ${sheetUrl}` : ""),
-    sheetUrl,
+    adminSummary: summary,
+    travelersAppended,
     customerEmail: s.customerEmail,
   };
 }
