@@ -1,23 +1,24 @@
 /**
  * fb-chat-service — Facebook Messenger webhook
- * v1.8.1 Stage 6.7 · LINE group escalation + customer waiting timer
+ * v1.9.0 Stage 6.8 · Bidirectional bot toggle (admin manual takeover via is_echo)
  *
- * What's new vs v1.8.0 (Stage 6.6):
- *   - Per-PSID "waiting" timer · starts when sensitive keyword detected
- *   - Auto-clear on: (a) new inbound from customer, or (b) is_echo (admin replied in Messenger UI)
- *   - Fires after WAITING_THRESHOLD_MS (default 15 min) · pushes notifyCustomerWaiting
- *   - is_echo events no longer just skipped — now used to detect admin manual takeover
+ * What's new vs v1.8.1 (Stage 6.7):
+ *   - is_echo (admin replied via Messenger UI) → pauseBot(customerPsid) for 2 hours
+ *   - All subsequent customer messages: bot does NOT auto-reply for paused PSIDs
+ *     · BUT: sensitive keyword alerts to LINE group still fire (admin still gets visibility)
+ *   - Sliding window: each admin echo extends pause by another 2h
+ *   - Auto-resume after 2h of no echo (configurable BOT_PAUSE_DURATION_MS)
+ *   - Per-PSID in-memory state · no Sheet persistence (Railway restart = all resume)
  *
- * Carried over from v1.8.0 (Stage 6.6):
- *   - LINE group notifier in 3 places: slip verified · booking collected · sensitive keyword
- *   - 5-min dedupe · PII redact · fire-and-forget
+ * Carried over:
+ *   - Stage 6.7: Customer waiting timer (still fires · pause cancels timer too)
+ *   - Stage 6.6: LINE group notifier · dedupe · PII redact · sensitive keyword detection
  *
  * New ENV (optional):
- *   WAITING_THRESHOLD_MS  — milliseconds (default 900000 = 15 min)
+ *   BOT_PAUSE_DURATION_MS  — milliseconds (default 7200000 = 2 hours)
  *
- * Existing ENV (from v1.8.0):
- *   LINE_PUSH_TOKEN  — Channel Access Token of LINE OA that owns the admin group
- *   LINE_GROUP_ID    — Target admin group ID
+ * Existing ENV:
+ *   LINE_PUSH_TOKEN, LINE_GROUP_ID, WAITING_THRESHOLD_MS · all unchanged
  */
 
 const express = require("express");
@@ -49,6 +50,13 @@ const {
   clearWaitingTimer,
   getConfigStatus: getNotifierStatus,
 } = require("./line-group-notifier");
+const {
+  pauseBot,
+  isBotPaused,
+  resumeBot,
+  getPauseInfo,
+  getConfigStatus: getPauseStatus,
+} = require("./bot-pause");
 
 const app = express();
 
@@ -282,11 +290,12 @@ app.get("/", (_req, res) => {
   const cacheStatus = getCacheStatus();
   const slipokBranches = loadSlipOKBranches();
   const notifierStatus = getNotifierStatus();
+  const pauseStatus = getPauseStatus();
   res.json({
     service: "fb-chat-service",
     status: "ok",
-    version: "1.8.0",
-    stage: "Stage 6.7 · LINE group escalation + customer waiting timer",
+    version: "1.9.0",
+    stage: "Stage 6.8 · Bidirectional bot toggle (admin manual takeover)",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -310,6 +319,8 @@ app.get("/", (_req, res) => {
     line_dedupe_cache_size: notifierStatus.dedupe_cache_size,
     line_active_waiting_timers: notifierStatus.active_waiting_timers,
     line_waiting_threshold_seconds: notifierStatus.waiting_threshold_seconds,
+    bot_pause_duration_seconds: pauseStatus.pause_duration_seconds,
+    bot_active_pauses: pauseStatus.active_pauses,
   });
 });
 
@@ -353,16 +364,19 @@ async function handleMessagingEvent(event) {
   if (!senderId) return;
 
   if (event.message?.is_echo === true) {
-    // Stage 6.7: Admin manually replied via FB Messenger UI → clear customer's waiting timer
+    // Stage 6.7/6.8: Admin manually replied via FB Messenger UI
     // For echo events, recipient.id = customer PSID (sender.id = Page ID)
     const customerPsid = event.recipient?.id;
     if (customerPsid) {
+      // Clear customer's waiting timer (Stage 6.7) — admin has responded
       const cleared = clearWaitingTimer(customerPsid, "admin_echo");
       if (cleared) {
         console.log(`[Webhook] is_echo · cleared waiting timer for customer ${customerPsid}`);
       }
+      // Pause bot for this customer (Stage 6.8) — admin is taking over
+      pauseBot(customerPsid, "admin_echo");
     }
-    console.log("[Webhook] Skipping is_echo event (post-clear)");
+    console.log("[Webhook] is_echo processed (pause + clear-timer)");
     return;
   }
 
@@ -461,6 +475,18 @@ async function handleMessagingEvent(event) {
         reason,
       });
     }
+  }
+
+  // ─── Stage 6.8: Bot pause check ─────────────────────────────────────────
+  // If admin has manually replied recently via FB Messenger UI, skip auto-reply.
+  // Customer messages are still logged + sensitive alerts still fire (above).
+  // Customer's existing collector session is preserved · just no NEW bot output.
+  if (isBotPaused(senderId)) {
+    const info = getPauseInfo(senderId);
+    console.log(
+      `[Bot] PAUSED — ${senderId} (admin took over · ${info?.minutesRemaining || "?"} min remaining · echoCount=${info?.echoCount || "?"})`
+    );
+    return;
   }
 
   // ─── Stage 6.5: Booking-collector takes priority if in session ──────────
@@ -636,7 +662,7 @@ async function handleMessagingEvent(event) {
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
   console.log(
-    "\n🚀 fb-chat-service v1.8.1 (Stage 6.7: LINE group escalation + customer waiting timer)"
+    "\n🚀 fb-chat-service v1.9.0 (Stage 6.8: Bidirectional bot toggle · admin manual takeover)"
   );
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
@@ -669,4 +695,8 @@ app.listen(PORT, () => {
     (Number(process.env.WAITING_THRESHOLD_MS) || 15 * 60 * 1000) / 1000
   );
   console.log("  WAITING_THRESHOLD:      ", `${waitingThresholdSec}s (${Math.round(waitingThresholdSec / 60)} min)`);
+  const pauseDurationSec = Math.round(
+    (Number(process.env.BOT_PAUSE_DURATION_MS) || 2 * 60 * 60 * 1000) / 1000
+  );
+  console.log("  BOT_PAUSE_DURATION:     ", `${pauseDurationSec}s (${Math.round(pauseDurationSec / 60)} min)`);
 });
