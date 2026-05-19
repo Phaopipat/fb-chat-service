@@ -1,21 +1,23 @@
 /**
  * fb-chat-service — Facebook Messenger webhook
- * v1.8.0 Stage 6.6 · LINE group escalation (admin alerts pushed to LINE group)
+ * v1.8.1 Stage 6.7 · LINE group escalation + customer waiting timer
  *
- * What's new vs v1.7.3 (Stage 6.5):
- *   - LINE group notifier wired in 3 places:
- *     a) After slip verified → notifySlipVerified (admin sees slip immediately)
- *     b) After booking-collector finalize → notifyBookingNamesCollected (admin sees full booking)
- *     c) On sensitive keyword detection → notifySensitiveKeyword (admin sees flagged customer messages)
- *   - All notifications are fire-and-forget · don't block customer reply
- *   - Dedupe 5-min rolling window keyed by reason:psid (no spam)
- *   - PII redact: phone 08X-XXX-XXXX · ref last-4 only
+ * What's new vs v1.8.0 (Stage 6.6):
+ *   - Per-PSID "waiting" timer · starts when sensitive keyword detected
+ *   - Auto-clear on: (a) new inbound from customer, or (b) is_echo (admin replied in Messenger UI)
+ *   - Fires after WAITING_THRESHOLD_MS (default 15 min) · pushes notifyCustomerWaiting
+ *   - is_echo events no longer just skipped — now used to detect admin manual takeover
  *
- * New ENV (optional · graceful degrade if missing):
+ * Carried over from v1.8.0 (Stage 6.6):
+ *   - LINE group notifier in 3 places: slip verified · booking collected · sensitive keyword
+ *   - 5-min dedupe · PII redact · fire-and-forget
+ *
+ * New ENV (optional):
+ *   WAITING_THRESHOLD_MS  — milliseconds (default 900000 = 15 min)
+ *
+ * Existing ENV (from v1.8.0):
  *   LINE_PUSH_TOKEN  — Channel Access Token of LINE OA that owns the admin group
  *   LINE_GROUP_ID    — Target admin group ID
- *
- * Without those env vars: bot still works · just no LINE group notifications.
  */
 
 const express = require("express");
@@ -43,6 +45,8 @@ const {
   notifyBookingNamesCollected,
   notifySensitiveKeyword,
   detectSensitiveKeyword,
+  startWaitingTimer,
+  clearWaitingTimer,
   getConfigStatus: getNotifierStatus,
 } = require("./line-group-notifier");
 
@@ -282,7 +286,7 @@ app.get("/", (_req, res) => {
     service: "fb-chat-service",
     status: "ok",
     version: "1.8.0",
-    stage: "Stage 6.6 · LINE group escalation (admin alerts to LINE group)",
+    stage: "Stage 6.7 · LINE group escalation + customer waiting timer",
     bot_enabled: BOT_ENABLED,
     test_mode_tab: TEST_MODE_TAB,
     test_mode_allowed_count: cacheStatus.allowedCount,
@@ -304,6 +308,8 @@ app.get("/", (_req, res) => {
     line_push_token: notifierStatus.line_push_token,
     line_group_id: notifierStatus.line_group_id,
     line_dedupe_cache_size: notifierStatus.dedupe_cache_size,
+    line_active_waiting_timers: notifierStatus.active_waiting_timers,
+    line_waiting_threshold_seconds: notifierStatus.waiting_threshold_seconds,
   });
 });
 
@@ -347,7 +353,16 @@ async function handleMessagingEvent(event) {
   if (!senderId) return;
 
   if (event.message?.is_echo === true) {
-    console.log("[Webhook] Skipping is_echo event");
+    // Stage 6.7: Admin manually replied via FB Messenger UI → clear customer's waiting timer
+    // For echo events, recipient.id = customer PSID (sender.id = Page ID)
+    const customerPsid = event.recipient?.id;
+    if (customerPsid) {
+      const cleared = clearWaitingTimer(customerPsid, "admin_echo");
+      if (cleared) {
+        console.log(`[Webhook] is_echo · cleared waiting timer for customer ${customerPsid}`);
+      }
+    }
+    console.log("[Webhook] Skipping is_echo event (post-clear)");
     return;
   }
 
@@ -419,6 +434,11 @@ async function handleMessagingEvent(event) {
     return;
   }
 
+  // ─── Stage 6.7: Clear customer's waiting timer (they sent a new inbound) ──
+  // If they were waiting for admin and now sent a follow-up, assume they got
+  // helped (or they're moving on). Clear timer to prevent stale alerts.
+  clearWaitingTimer(senderId, "customer_followup");
+
   // ─── Stage 6.6: Sensitive keyword detection (TEXT messages only) ────────
   // Fire-and-forget · doesn't block AI reply or collector flow
   if (messageType === "text" && text) {
@@ -431,6 +451,15 @@ async function handleMessagingEvent(event) {
         customerMessage: text,
         reason,
       }).catch((err) => console.warn("[Group] Notify error:", err.message));
+
+      // Stage 6.7: Start 15-min waiting timer (auto-cleared on next customer
+      // message or admin is_echo). If neither happens, alert LINE group.
+      startWaitingTimer({
+        psid: senderId,
+        senderName,
+        lastMessage: text,
+        reason,
+      });
     }
   }
 
@@ -607,7 +636,7 @@ async function handleMessagingEvent(event) {
 app.listen(PORT, () => {
   const slipokBranches = loadSlipOKBranches();
   console.log(
-    "\n🚀 fb-chat-service v1.8.0 (Stage 6.6: LINE group escalation · admin alerts to LINE)"
+    "\n🚀 fb-chat-service v1.8.1 (Stage 6.7: LINE group escalation + customer waiting timer)"
   );
   console.log(`Listening on port ${PORT}`);
   console.log("— Environment Check —");
@@ -636,4 +665,8 @@ app.listen(PORT, () => {
   console.log("  EMAIL_RESERVATION:      ", EMAIL_RESERVATION ? "✅ set" : "⚠️  MISSING (email disabled)");
   console.log("  LINE_PUSH_TOKEN:        ", LINE_PUSH_TOKEN ? "✅ set" : "⚠️  MISSING (LINE group notifications disabled)");
   console.log("  LINE_GROUP_ID:          ", LINE_GROUP_ID ? "✅ set" : "⚠️  MISSING (LINE group notifications disabled)");
+  const waitingThresholdSec = Math.round(
+    (Number(process.env.WAITING_THRESHOLD_MS) || 15 * 60 * 1000) / 1000
+  );
+  console.log("  WAITING_THRESHOLD:      ", `${waitingThresholdSec}s (${Math.round(waitingThresholdSec / 60)} min)`);
 });

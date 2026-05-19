@@ -210,12 +210,78 @@ function detectSensitiveKeyword(text) {
   return null;
 }
 
+// ─── Stage 6.7: Customer waiting timer ─────────────────────────────────────
+// When customer triggers an event that needs admin attention (sensitive keyword,
+// collector stuck, etc.), start a per-PSID timer. If admin doesn't intervene
+// (or customer doesn't send a new message) within WAITING_THRESHOLD_MS,
+// push `notifyCustomerWaiting` as a reminder to the LINE admin group.
+//
+// Behavior:
+//   - startWaitingTimer({ psid, senderName, lastMessage, reason })
+//       → clears any existing timer for this psid · starts fresh
+//   - clearWaitingTimer(psid)
+//       → called when customer sends new inbound · or is_echo received (admin replied)
+//   - Timer fires → notifyCustomerWaiting + auto-clears entry
+
+const WAITING_THRESHOLD_MS = Number(process.env.WAITING_THRESHOLD_MS) || 15 * 60 * 1000; // 15 min default
+
+const _waitingTimers = new Map(); // psid → { handle, startedAt, lastMessage, senderName, reason }
+
+function startWaitingTimer({ psid, senderName, lastMessage, reason }) {
+  if (!psid) return;
+
+  // Clear any prior timer for this psid
+  const existing = _waitingTimers.get(psid);
+  if (existing) {
+    clearTimeout(existing.handle);
+    console.log(`[group] Replacing existing waiting timer for psid=${psid}`);
+  }
+
+  const handle = setTimeout(() => {
+    notifyCustomerWaiting({ senderName, psid, lastMessage })
+      .catch((err) => console.warn("[group] waiting-timer notify error:", err.message));
+    _waitingTimers.delete(psid);
+  }, WAITING_THRESHOLD_MS);
+
+  _waitingTimers.set(psid, {
+    handle,
+    startedAt: Date.now(),
+    lastMessage,
+    senderName,
+    reason,
+  });
+
+  console.log(
+    `[group] Started waiting timer for psid=${psid} reason=${reason} · fires in ${Math.round(
+      WAITING_THRESHOLD_MS / 1000
+    )}s`
+  );
+}
+
+function clearWaitingTimer(psid, reason = "manual") {
+  const entry = _waitingTimers.get(psid);
+  if (!entry) return false;
+  clearTimeout(entry.handle);
+  _waitingTimers.delete(psid);
+  const elapsedSec = Math.round((Date.now() - entry.startedAt) / 1000);
+  console.log(
+    `[group] Cleared waiting timer for psid=${psid} reason=${reason} · was ${elapsedSec}s old`
+  );
+  return true;
+}
+
+function getActiveWaitingCount() {
+  return _waitingTimers.size;
+}
+
 // ─── Config check (for /health) ────────────────────────────────────────────
 function getConfigStatus() {
   return {
     line_group_id: LINE_GROUP_ID ? "✅ set" : "⚠️  missing (notifications disabled)",
     line_push_token: LINE_PUSH_TOKEN ? "✅ set" : "⚠️  missing (notifications disabled)",
     dedupe_cache_size: _dedupe.size,
+    active_waiting_timers: _waitingTimers.size,
+    waiting_threshold_seconds: Math.round(WAITING_THRESHOLD_MS / 1000),
   };
 }
 
@@ -226,6 +292,10 @@ module.exports = {
   notifyCustomerWaiting,
   notifySensitiveKeyword,
   detectSensitiveKeyword,
+  // Stage 6.7: waiting timer
+  startWaitingTimer,
+  clearWaitingTimer,
+  getActiveWaitingCount,
   getConfigStatus,
   // exports for unit testing
   _internal: { shouldDedupe, redactPhone, redactRef, bkkTime },
