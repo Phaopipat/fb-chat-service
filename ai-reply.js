@@ -1000,6 +1000,14 @@ function sanitizeReply(text) {
   cleaned = cleaned.replace(/ยังไม่มี\s*context[^\n]*/gi, '');
   cleaned = cleaned.replace(/ในการตอบครั้งหน้า[^\n]*/gi, '');
   cleaned = cleaned.replace(/ขอให้ลูกค้าบอก[^\n]*/gi, '');
+  // Day 9 Phase A (skill v0.10.0 Layer 3): catch hallucinated room names + creative phrases
+  cleaned = cleaned.replace(/ดินแดนหวานใจ/gi, '');
+  cleaned = cleaned.replace(/Home Chalet/gi, 'Home (เรือนไทย)');
+  cleaned = cleaned.replace(/ห้องแต่งพิเศษสำหรับ[^\n]*/gi, '');
+  if (/ขอชี้แจง[^\n]*\n[\s\S]*1\.[^\n]+\n[\s\S]*2\./i.test(cleaned)) {
+    console.warn('[sanitize] multi-query clarification caught · replacing with standby');
+    cleaned = 'รับทราบครับ 🙏 รอแป๊บนึงนะครับ · เดี๋ยวกัปตันช่วยตอบให้ตรงเลย 😊';
+  }
   // Strip parenthetical option lists with 3+ slash-separated items (meta instructions)
   cleaned = cleaned.replace(/\((?:[^()]*\/[^()]*){2,}[^()]*\)/g, '');
   // ลบบรรทัดที่ขึ้นต้นด้วย "ตามกฎ" / "ตามสไตล์" / "ตาม policy"
