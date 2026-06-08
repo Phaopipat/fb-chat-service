@@ -523,7 +523,8 @@ const KAPTAN_SYSTEM_PROMPT = `คุณคือ แอดมิน reservation 
    ✅ **ถูก (EN · same):** "Day Trip's afternoon boat usually departs the island at 2:30 PM. During this rainy season (mid-May to end July), if the tide is unusually low, the boat may depart earlier around 2:00 PM — our admin will confirm the exact time before your trip 🙏"
 - **ห้องนอนได้กี่คน** [ROOM_CAPACITY_PER_TYPE_V36]: ห้องพักแต่ละประเภทรับคนได้ต่างกัน — **ไม่ใช่ทุกห้อง 4 ท่าน** · ราคาคิดต่อคน ยิ่งมาหลายคนยิ่งคุ้มครับ 😊
   รายละเอียดแต่ละห้อง:
-  • Thai Style Ocean Villa — 2-4 ท่าน/ห้อง
+  • Thai Style Ocean Villa — 2-4 ท่าน/ห้อง (T1-T4 · Family Villa)
+  • Thai Style Single (อ่าวใหญ่) · T5-T12 — 1-2 ท่าน/ห้อง (1King · ลูกค้าเรียก "ห้องบ้านไทย ห้องเล็ก" / "พักเดี่ยว") · ระเบียงเชื่อมหน้าห้อง · ⚠️ ต่างจาก Home (อ่าวมุก) · ราคาขอแอดมินยืนยัน [SPECIFIC_PROMO_ESCALATE_V14]
   • Manila Deluxe Chalet  — 2-4 ท่าน/ห้อง (ราคา/คนเหมือนกันไม่ว่าจะมา 2 หรือ 4 ท่าน ยกเว้นพักคนเดียว +30%)
   • Home (เรือนไทย) · อ่าวมุก — **มีหลายแบบ 2-6 ท่าน/ห้อง** (R20-R34 · ขึ้นกับ sub-type · ดู ROOM-CAPACITY-CANONICAL-SPEC.md)
   • Beach Chalet · อ่าวมุก   — **3 ท่าน/ห้อง** (1 King + 1 Single · R10-R18) · 1 หลัง = 3 ห้องนอน รับ 9 คน
@@ -994,6 +995,13 @@ function sanitizeReply(text) {
   let cleaned = text;
   // Day 9 2026-06-08: strip markdown **bold** (FB Messenger doesn't render it)
   cleaned = cleaned.replace(/\*\*([^\*\n]+?)\*\*/g, '$1');
+  // Day 9 2026-06-08: strip internal reasoning leak (bot meta self-talk)
+  cleaned = cleaned.replace(/ลูกค้าเพิ่งเริ่ม[^\n]*/gi, '');
+  cleaned = cleaned.replace(/ยังไม่มี\s*context[^\n]*/gi, '');
+  cleaned = cleaned.replace(/ในการตอบครั้งหน้า[^\n]*/gi, '');
+  cleaned = cleaned.replace(/ขอให้ลูกค้าบอก[^\n]*/gi, '');
+  // Strip parenthetical option lists with 3+ slash-separated items (meta instructions)
+  cleaned = cleaned.replace(/\((?:[^()]*\/[^()]*){2,}[^()]*\)/g, '');
   // ลบบรรทัดที่ขึ้นต้นด้วย "ตามกฎ" / "ตามสไตล์" / "ตาม policy"
   cleaned = cleaned.replace(/^[ \t]*(ตามกฎ|ตามสไตล์|ตาม policy|ตาม guidelines|ตามข้อกำหนด)[^\n]*\n?/gmi, "");
   // ลบ version markers แบบ FOO_BAR_V14, _V18, etc. ที่อยู่ในบรรทัด (เช่น "ตามกฎ POOTALAY_DATE_DEFAULT_V18: ...")
