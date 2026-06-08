@@ -1018,6 +1018,18 @@ function sanitizeReply(text) {
   cleaned = cleaned.replace(/ดินแดนหวานใจ/gi, '');
   cleaned = cleaned.replace(/Home Chalet/gi, 'Home (เรือนไทย)');
   cleaned = cleaned.replace(/ห้องแต่งพิเศษสำหรับ[^\n]*/gi, '');
+  // Day 9 PM Bug #10: strip tool call meta leak (FM-08 pattern · skill v0.10.0)
+  cleaned = cleaned.replace(/\(\s*เรียก tool[^)]*\)/gi, '');         // (เรียก tool check_room_availability ...)
+  cleaned = cleaned.replace(/\(\s*call tool[^)]*\)/gi, '');          // EN variant
+  cleaned = cleaned.replace(/หากห้องว่าง:[^\n]*(\n[^\n]*)?/gi, ''); // conditional leak (เผื่อตอบหลายแบบ)
+  cleaned = cleaned.replace(/หากห้องเต็ม:[^\n]*(\n[^\n]*)?/gi, '');
+  cleaned = cleaned.replace(/if available:[^\n]*/gi, '');             // EN variants
+  cleaned = cleaned.replace(/if unavailable:[^\n]*/gi, '');
+  // FM-08 unsafe availability commit · catch leading "ดีครับ! ... ยังมีห้องว่าง"
+  if (/^\s*ดีครับ[!\s]*\d[^!]*ห้องว่าง/i.test(cleaned) || /^\s*ยังมีห้องว่าง/i.test(cleaned)) {
+    console.warn('[sanitize] FM-08 unsafe availability commit caught · replacing');
+    cleaned = 'ขอเช็คให้ก่อนนะครับ 😊 รบกวนยืนยัน · มาวันไหน · พักกี่คืน · กี่ท่านครับ?';
+  }
   if (/ขอชี้แจง[^\n]*\n[\s\S]*1\.[^\n]+\n[\s\S]*2\./i.test(cleaned)) {
     console.warn('[sanitize] multi-query clarification caught · replacing with standby');
     cleaned = 'รับทราบครับ 🙏 รอแป๊บนึงนะครับ · เดี๋ยวกัปตันช่วยตอบให้ตรงเลย 😊';
