@@ -992,6 +992,8 @@ const AVAILABILITY_ESCALATE_EN =
 function sanitizeReply(text) {
   if (!text) return text;
   let cleaned = text;
+  // Day 9 2026-06-08: strip markdown **bold** (FB Messenger doesn't render it)
+  cleaned = cleaned.replace(/\*\*([^\*\n]+?)\*\*/g, '$1');
   // ลบบรรทัดที่ขึ้นต้นด้วย "ตามกฎ" / "ตามสไตล์" / "ตาม policy"
   cleaned = cleaned.replace(/^[ \t]*(ตามกฎ|ตามสไตล์|ตาม policy|ตาม guidelines|ตามข้อกำหนด)[^\n]*\n?/gmi, "");
   // ลบ version markers แบบ FOO_BAR_V14, _V18, etc. ที่อยู่ในบรรทัด (เช่น "ตามกฎ POOTALAY_DATE_DEFAULT_V18: ...")
