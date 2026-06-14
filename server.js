@@ -176,8 +176,62 @@ async function sendFbMessage(psid, text) {
   }
 }
 
+// Day 9 PM Bug #15: Try attachment_id first (bypasses URL fetch in Dev mode)
+// Fall back to URL if attachment_id not in cache
+const fs = require("fs");
+const path = require("path");
+let ATTACHMENT_ID_MAP = {};
+try {
+  ATTACHMENT_ID_MAP = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "attachment-id-map.json"), "utf8")
+  );
+  console.log(`[server] attachment-id-map loaded · ${Object.keys(ATTACHMENT_ID_MAP).length} cached`);
+} catch (e) {
+  console.warn("[server] attachment-id-map.json not found · will use URL fallback");
+}
+
 async function sendFbImage(psid, imageUrl) {
   if (!FB_PAGE_ACCESS_TOKEN || !psid || !imageUrl) return null;
+
+  // Try attachment_id first (works in Dev mode)
+  const cachedId = ATTACHMENT_ID_MAP[imageUrl];
+  const payload = cachedId
+    ? { attachment_id: cachedId }
+    : { url: imageUrl, is_reusable: true };
+  const method = cachedId ? "attachment_id" : "url";
+
+  try {
+    const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient: { id: psid },
+        messaging_type: "RESPONSE",
+        message: {
+          attachment: { type: "image", payload },
+        },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error(`[SendImage] Failed via ${method}:`, res.status, JSON.stringify(data));
+      // If attachment_id failed, try URL fallback once
+      if (cachedId) {
+        console.warn(`[SendImage] attachment_id failed · retry with URL`);
+        return sendFbImageUrlOnly(psid, imageUrl);
+      }
+      return null;
+    }
+    console.log(`[SendImage] → ${psid} via ${method}: ${imageUrl.split("/").slice(-3).join("/")}`);
+    return { mid: data.message_id || "" };
+  } catch (err) {
+    console.error("[SendImage] Error:", err.message);
+    return null;
+  }
+}
+
+async function sendFbImageUrlOnly(psid, imageUrl) {
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
     const res = await fetch(url, {
@@ -193,13 +247,12 @@ async function sendFbImage(psid, imageUrl) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      console.error("[SendImage] Failed:", res.status, JSON.stringify(data));
+      console.error("[SendImage URL fallback] Failed:", res.status, JSON.stringify(data));
       return null;
     }
-    console.log(`[SendImage] → ${psid}: ${imageUrl.split("/").slice(-3).join("/")}`);
     return { mid: data.message_id || "" };
   } catch (err) {
-    console.error("[SendImage] Error:", err.message);
+    console.error("[SendImage URL fallback] Error:", err.message);
     return null;
   }
 }
