@@ -12,7 +12,10 @@
 //   • isImageRequest() expanded patterns: ห้องพัก/ห้องน้ำ/family/honeymoon/studio/single/แผนที่/ท่าเรือ/flyer/volleyball
 // Defensive: Railway's RAILWAY_STATIC_URL is hostname-only (no scheme).
 // LINE Messaging API rejects URLs without https://. Force scheme.
-const _BASE_URL_RAW = (process.env.SERVICE_URL || process.env.RAILWAY_STATIC_URL || process.env.BASE_URL || 'https://webhook-kohtalu-production.up.railway.app').replace(/\/$/, '');
+// Day 9 PM Bug #16: prioritize IMAGE_HOST + hardcoded fallback FIRST
+// because FB Railway auto-sets RAILWAY_STATIC_URL to fb-chat-service URL
+// (which doesn't serve images · LINE bot does) · breaks attachment_id lookup
+const _BASE_URL_RAW = (process.env.IMAGE_HOST || process.env.BASE_URL || 'https://webhook-kohtalu-production.up.railway.app').replace(/\/$/, '');
 const BASE_URL = /^https?:\/\//i.test(_BASE_URL_RAW) ? _BASE_URL_RAW : 'https://' + _BASE_URL_RAW;
 console.log(`[image-map] BASE_URL=${BASE_URL}`);  // surface at startup for debugging
 function url(p) { return `${BASE_URL}/images/${p}`; }
