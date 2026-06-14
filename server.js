@@ -615,7 +615,11 @@ async function handleMessagingEvent(event) {
   if (isImageRequest(text)) {
     matchedImages = matchImages(text);
     if (matchedImages) {
-      console.log(`[Image] Matched category=${matchedImages.category} · ${matchedImages.urls.length} url(s)`);
+      // Day 9 PM Bug #12 fix: LINE image-map returns {images, caption} not {urls, category}
+      // Map to FB-expected shape for downstream send logic
+      matchedImages.urls = matchedImages.images || [];
+      matchedImages.category = matchedImages.caption || 'images';
+      console.log(`[Image] Matched caption=${matchedImages.caption} · ${matchedImages.urls.length} url(s)`);
     } else {
       console.log(`[Image] isImageRequest=true but no match · will escalate via lint`);
     }
