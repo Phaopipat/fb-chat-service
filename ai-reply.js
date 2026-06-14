@@ -1114,11 +1114,14 @@ async function getFbHistory({
     });
     const rows = res.data.values || [];
     const cutoff = Date.now() - windowMinutes * 60 * 1000;
-    // Filter: matching senderId + text type + within time window
+    // Filter: matching senderId + text|image type + within time window
+    // Day 9 PM Bug #4 root cause fix: include image rows so bot's image-only
+    // replies appear in context · prevents AI from thinking prior question
+    // was unanswered and trying to combine queries.
     const userRows = rows
       .filter((r) => {
         if (r[3] !== senderId) return false;
-        if (r[5] !== "text") return false;
+        if (r[5] !== "text" && r[5] !== "image") return false;  // include image-only bot replies
         if (!r[6]) return false;
         // Parse ISO timestamp · skip rows older than cutoff
         const ts = new Date(r[0]).getTime();
@@ -1133,7 +1136,7 @@ async function getFbHistory({
     }
     return userRows.map((r) => ({
       role: r[9] === "outbound" ? "assistant" : "user",
-      content: r[6],
+      content: r[5] === "image" ? "[ส่งรูปให้ลูกค้าแล้ว]" : r[6],  // placeholder for image replies
     }));
   } catch (err) {
     console.warn("[AI] getFbHistory error:", err.message);
