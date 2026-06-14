@@ -1018,6 +1018,15 @@ function sanitizeReply(text) {
   cleaned = cleaned.replace(/ดินแดนหวานใจ/gi, '');
   cleaned = cleaned.replace(/Home Chalet/gi, 'Home (เรือนไทย)');
   cleaned = cleaned.replace(/ห้องแต่งพิเศษสำหรับ[^\n]*/gi, '');
+  // Day 9 PM Bug #11: strip hallucinated phone numbers + admin contact info
+  // Bot should NEVER provide phone numbers · admin team handles direct contact
+  cleaned = cleaned.replace(/Tel[:.]?\s*\d{2,3}[-\s]?\d{3,4}[-\s]?\d{4}[^\n]*/gi, '');
+  cleaned = cleaned.replace(/โทร[ศัพท์]*[:.]?\s*\d{2,3}[-\s]?\d{3,4}[-\s]?\d{4}[^\n]*/gi, '');
+  cleaned = cleaned.replace(/Phone[:.]?\s*\d{2,3}[-\s]?\d{3,4}[-\s]?\d{4}[^\n]*/gi, '');
+  cleaned = cleaned.replace(/On Shore by Koko[^\n]*/gi, '');         // hallucinated business name
+  // Day 9 PM Bug #11: strip room-existence doubt (bot questioning valid rooms)
+  cleaned = cleaned.replace(/ขอยืนยันว่าเป็นห้องที่มีจริง[^\n]*/gi, '');
+  cleaned = cleaned.replace(/เป็นห้องที่มีอยู่จริง[^\n]*/gi, '');
   // Day 9 PM Bug #10: strip tool call meta leak (FM-08 pattern · skill v0.10.0)
   cleaned = cleaned.replace(/\(\s*เรียก tool[^)]*\)/gi, '');         // (เรียก tool check_room_availability ...)
   cleaned = cleaned.replace(/\(\s*call tool[^)]*\)/gi, '');          // EN variant
