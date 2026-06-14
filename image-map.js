@@ -257,9 +257,12 @@ function matchImages(text) {
     }
   }
   // ── Room type query ───────────────────────────────────────────────────────
-  const isThai    = /thai\s*style|ไทย|ทรงไทย/i.test(t);
-  const isDeluxe  = /manila|deluxe|มะนิลา|ดีลักซ์/i.test(t);
-  const isChalet  = /beach\s*chalet|ชาเลต์?|อ่าวมุก|chalet/i.test(t);
+  const isThai    = /thai\s*style|ไทยสไตล์|ทรงไทย/i.test(t);
+  const isDeluxe  = /manila|deluxe|มะนิลา|มะลิลา|ดีลักซ์|ดีลัก/i.test(t);
+  const isChalet  = /beach\s*chalet|ชาเลต์?|chalet|บีชชาเล/i.test(t);
+  // Day 9 PM Bug #14 follow-up: "Home" alone routes to Beach Chalet (closest match · อ่าวมุก)
+  // since R20-R34 Home house photos not yet captured (Day 10+ backlog)
+  const isHomeGeneric = /\bhome\b|เรือนไทย|รูป\s*Home/i.test(t) && !isThai && !isDeluxe;
   const wantsExtCategory = /ภายนอก|exterior|นอก|หน้าห้อง/i.test(t);
   const cat = wantsExtCategory ? 'exterior' : 'interior';
   if (isThai) {
@@ -273,6 +276,11 @@ function matchImages(text) {
   if (isChalet) {
     const images = lookupByRoomType('beach_chalet', cat);
     if (images.length) return { images: images.slice(0, 6), caption: `รูป Beach Chalet R10-R18 (${cat === 'exterior' ? 'ภายนอก' : 'ภายใน'})` };
+  }
+  // Day 9 PM Bug #14 follow-up: "Home" → show Beach Chalet (R20-R34 photos not yet captured)
+  if (isHomeGeneric) {
+    const images = lookupByRoomType('beach_chalet', cat);
+    if (images.length) return { images: images.slice(0, 6), caption: `รูป Home / Beach Chalet (อ่าวมุก) ครับ 🛖 — R20-R34 บ้านทรงไทยรูปแบบอื่นๆ ขอแอดมินส่งให้นะครับ` };
   }
   // V58b: "ห้องพักทุกแบบ" / "ห้องพักทั้งหมด" / "ทุกห้อง" → return one sample from each main type
   if (!/กิจกรรม|activity/i.test(t) && /ทุก(?:ห้อง|แบบ|อย่าง)|ห้องพัก(?:ทุก|ทั้งหมด)|ทั้งหมด.*ห้องพัก|ห้องพักมี(?:อะไร|ไหน)บ้าง/i.test(t)) {
@@ -432,6 +440,8 @@ const V87_VISUAL_INTENT_PATTERNS = [
   /ส่ง\s*(?:รูป|ภาพ|map|แผนที่)/i,
   /อยาก\s*ดู\s*(?:รูป|ภาพ)/i,
   /รูป(?:ห้อง|ท่าเรือ|ภายใน|ภายนอก|กิจกรรม|อาหาร|ดำน้ำ|ดำน้ำตื้น|คายัค|kayak|snorkel|เรือใบ|sail|ตกปลา|ร้านอาหาร|นวด|massage|วิว|view|บรรยากาศ|สระ|บาร์|เมนู|menu|ทะเล|beach|วอลเลย์|volleyball|ดำน้ำลึก|diving)/i,
+  // Day 9 PM Bug #14: V87 expand for Day 8-9 room types + admin terminology
+  /รูป\s*(?:ห้อง\s*)?(?:two[\s-]?story|Two[\s-]?Story|สอง\s*ชั้น|2\s*ชั้น|toproom|bottomroom|single[\s_]*room|beach[\s-]?front|Beach\s*Chalet|บีชชาเล|Manila|มะลิลา|Thai\s*Style|ไทย\s*สไตล์|honeymoon|ฮันนีมูน|Home|เรือนไทย|R\d{1,2})/i,
   /แผนที่/i,
   /\bphoto(?:s)?\b/i,
   /\bpicture(?:s)?\b/i,
@@ -464,7 +474,7 @@ function wouldBeImageRequestBeforeV87(text) {
   if (/[TDRtdr]\d{1,2}\s+(?:ภายใน|ภายนอก|interior|exterior)/i.test(text)) return true;
   // ─── Phase 2.5B Plan D additions ─────────────────────────────────────────
   // Sub-type room queries
-  if (/(?:family\s*villa|family\s*room|honeymoon|studio|สตูดิโอ|single\s*room|ห้องครอบครัว|ฮันนีมูน|ห้องเดี่ยว|ห้องเล็ก|พักเดี่ยว|บ้านไทย|two[\s-]?story|สองชั้น|toproom|bottomroom|\br2[2367]\b|beach[\s-]?front|หน้าหาด)/i.test(text)) return true;
+  if (/(?:family\s*villa|family\s*room|honeymoon|studio|สตูดิโอ|single\s*room|ห้องครอบครัว|ฮันนีมูน|ห้องเดี่ยว|ห้องเล็ก|พักเดี่ยว|บ้านไทย|two[\s-]?story|สองชั้น|toproom|bottomroom|\br2[2367]\b|beach[\s-]?front|หน้าหาด|Manila|มะลิลา|Thai\s*Style|ไทย\s*สไตล์|Home|เรือนไทย|Beach\s*Chalet|บีชชาเล)/i.test(text)) return true;
   // Location / pier
   if (/(?:แผนที่|ที่ตั้ง|location|map|ท่าเรือ|บ้านมะพร้าว|pier|mainland)/i.test(text)) return true;
   // Flyer / itinerary
