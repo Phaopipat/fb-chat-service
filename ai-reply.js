@@ -8,6 +8,8 @@
  * Stage 2.5 จะเพิ่ม KB · Stage 2.6 จะเพิ่ม Pricing-from-Sheet
  */
 
+const { lookupKB, incrementUsage: kbIncrementUsage } = require('./knowledge-base');
+
 const KAPTAN_SYSTEM_PROMPT = `🚨 ANTI-HALLUCINATION RULES [HALLUCINATION_DEFENSE_V38]
 1. ห้ามรวม unanswered queries · ตอบเฉพาะข้อความล่าสุด · ห้ามถาม "ขอชี้แจงหน่อย คุณหมายถึง 1. ... 2. ..."
    ✅ ตอบข้อความล่าสุดตรงๆ ❌ ห้าม clarification combining
@@ -1169,8 +1171,40 @@ async function generateReply({
   }
   if (!text || !text.trim()) return null;
 
+  // FB Phase F (2026-06-14): KB lookup before AI gen
+  // Uses KB_SHEET_ID (LINE Sheet · cross-Sheet read) for shared KnowledgeBase content.
+  const KB_SHEET_ID = process.env.KB_SHEET_ID || spreadsheetId;
+  let kbHintContext = '';
+  try {
+    if (process.env.KB_LOOKUP_ENABLED !== 'false' && KB_SHEET_ID && sheets) {
+      const kbHit = await lookupKB({
+        sheets,
+        sheetId: KB_SHEET_ID,
+        customerMessage: text,
+        topic: null,
+        apiKey,
+        today: new Date().toISOString().slice(0, 10),
+      });
+
+      if (kbHit) {
+        const kbMode = kbHit._isHint ? 'hint' : 'direct';
+        console.log(`[KB] hit ${kbHit.id} conf=${kbHit._confidence} mode=${kbMode}`);
+        if (kbMode === 'direct') {
+          if (kbIncrementUsage) {
+            kbIncrementUsage({ sheets, sheetId: KB_SHEET_ID, kbId: kbHit.id })
+              .catch((e) => console.warn('[KB] incrementUsage error:', e.message));
+          }
+          return kbHit.answer;
+        }
+        kbHintContext = `\n\n[KB context (verified · use as reference, rephrase naturally):\n${kbHit.answer}\n]`;
+      }
+    }
+  } catch (err) {
+    console.warn('[KB] lookupKB error · falling back to AI gen:', err.message);
+  }
+
   const history = await getFbHistory({ sheets, spreadsheetId, sheetTab, senderId });
-  const userContent = `ลูกค้าชื่อ "${displayName || "ไม่ระบุ"}" พิมพ์ว่า:\n"${text}"`;
+  const userContent = `ลูกค้าชื่อ "${displayName || "ไม่ระบุ"}" พิมพ์ว่า:\n"${text}"${kbHintContext}`;
   const messages = [...history, { role: "user", content: userContent }];
 
   try {
