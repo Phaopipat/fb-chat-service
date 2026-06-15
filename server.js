@@ -39,10 +39,12 @@ const { parseThaiDateRange: _parseThaiDateRangeFB } = require("./fb-date-parser"
 
 // Format availability result as customer-facing reply
 function _formatAvailabilityReplyFB(parsed, result) {
-  const { checkIn, checkOut, bays, totalAvailable } = result;
-  const dateStr = checkIn === checkOut || (new Date(checkOut) - new Date(checkIn)) === 86_400_000
-    ? checkIn
-    : `${checkIn} ถึง ${checkOut}`;
+  // FB_AVAIL_V2_SERVER_HOTFIX: use parsed.checkIn directly · reliable
+  const { bays, totalAvailable } = result;
+  const checkIn = parsed.checkIn;
+  const checkOut = parsed.checkOut;
+  const oneNight = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) === 86_400_000;
+  const dateStr = oneNight ? checkIn : `${checkIn} ถึง ${checkOut}`;
 
   if (totalAvailable === 0) {
     return `ช่วง ${dateStr} ห้องเต็มแล้วครับ 😔 ขอแอดมินช่วยเช็ควันอื่นใกล้เคียงให้ครับ 🙏`;
@@ -793,12 +795,17 @@ async function handleMessagingEvent(event) {
     }
     // ── end FB_STEP3_SHADOW_WIRED ──
 
-    // ── FB_AVAILABILITY_WIRED — availability check before AI gen ──
+    // ── FB_AVAILABILITY_WIRED + FB_AVAIL_V2_SERVER_HOTFIX — availability check before AI gen ──
     if (process.env.AVAILABILITY_CHECK_ENABLED !== 'false' && messageType === 'text') {
       try {
         const _availIntent = _classifyIntentShadowFB(text, _leadProfileFB);
-        if (_availIntent.intent === 'AVAILABILITY') {
-          const _parsed = _parseThaiDateRangeFB(text);
+        // FB_AVAIL_V2_SERVER_HOTFIX: widen trigger — fire on explicit AVAILABILITY OR (date + booking verb) OR (date + FREE_FORM)
+        const _hasBookingVerb = /พัก|ค้าง|จอง|อยาก(?:ไป|มา|พัก)?|ไปเที่ยว|มาเที่ยว|stay|book/i.test(text);
+        const _parsedProbe = _parseThaiDateRangeFB(text);
+        const _shouldCheckAvail = _availIntent.intent === 'AVAILABILITY' ||
+          (_parsedProbe && (_hasBookingVerb || (_availIntent.intent === 'FREE_FORM' && /\d/.test(text))));
+        if (_shouldCheckAvail) {
+          const _parsed = _parsedProbe || _parseThaiDateRangeFB(text);
           if (_parsed) {
             const _vd = _validateDatesFB(_parsed.checkIn, _parsed.checkOut);
             if (_vd.ok) {
