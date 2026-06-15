@@ -39,12 +39,20 @@ const { parseThaiDateRange: _parseThaiDateRangeFB } = require("./fb-date-parser"
 
 // Format availability result as customer-facing reply
 function _formatAvailabilityReplyFB(parsed, result) {
-  // FB_AVAIL_V2_SERVER_HOTFIX: use parsed.checkIn directly · reliable
-  const { bays, totalAvailable } = result;
+  // FB_AVAIL_V2_SERVER_HOTFIX + FB_AVAIL_V3_UNKNOWN: parsed dates + smart unknown handling
+  const { bays, totalAvailable, hasUnknown } = result;
   const checkIn = parsed.checkIn;
   const checkOut = parsed.checkOut;
   const oneNight = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) === 86_400_000;
   const dateStr = oneNight ? checkIn : `${checkIn} ถึง ${checkOut}`;
+
+  // FB_AVAIL_V3_UNKNOWN: if all rooms = unknown (Drive read fail) · escalate · don't say "เต็ม"
+  const allUnknown = totalAvailable === 0 && hasUnknown &&
+    Object.values(bays).every(b => (b.available?.length || 0) === 0 && (b.booked?.length || 0) === 0);
+  if (allUnknown) {
+    console.warn(`[AVAIL-FB] hasUnknown=true · likely Drive read fail · dates=${dateStr}`);
+    return `ขอเช็คห้องว่างกับแอดมินช่วง ${dateStr} ก่อนนะครับ 🙏 รบกวนรอสักครู่ครับ`;
+  }
 
   if (totalAvailable === 0) {
     return `ช่วง ${dateStr} ห้องเต็มแล้วครับ 😔 ขอแอดมินช่วยเช็ควันอื่นใกล้เคียงให้ครับ 🙏`;
@@ -809,9 +817,11 @@ async function handleMessagingEvent(event) {
           if (_parsed) {
             const _vd = _validateDatesFB(_parsed.checkIn, _parsed.checkOut);
             if (_vd.ok) {
-              console.log(`[AVAIL-FB] intent=AVAILABILITY dates=${_parsed.checkIn}..${_parsed.checkOut} hint="${_parsed.hint}"`);
+              console.log(`[AVAIL-FB] intent=${_availIntent.intent} dates=${_parsed.checkIn}..${_parsed.checkOut} hint="${_parsed.hint}"`);
               const _auth = await getGoogleAuth();
               const _result = await _checkBayAvailFB(_auth, _parsed.checkIn, _parsed.checkOut);
+              // FB_AVAIL_V3_UNKNOWN: log result breakdown for diagnosis
+              console.log(`[AVAIL-FB] result · totalAvailable=${_result.totalAvailable} hasUnknown=${_result.hasUnknown} bays=${JSON.stringify(_result.bays).substring(0,200)}`);
               const _availReply = _formatAvailabilityReplyFB(_parsed, _result);
               await sendAndLog(senderId, _availReply);
               return;  // skip generateReply
