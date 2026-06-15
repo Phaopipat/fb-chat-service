@@ -433,7 +433,23 @@ app.get("/", (_req, res) => {
   });
 });
 
-app.post("/admin/refresh-testmode-cache", (_req, res) => {
+// E11_FB_ADMIN_AUTH: gate admin endpoints with Bearer ADMIN_API_TOKEN (parity w/ LINE bot E11)
+// Pattern: `Authorization: Bearer $ADMIN_API_TOKEN` · 401 if mismatch · 503 if env unset
+function requireAdminToken(req, res, next) {
+  const token = process.env.ADMIN_API_TOKEN;
+  if (!token) {
+    console.warn("[E11] ADMIN_API_TOKEN not set · /admin/* will 503");
+    return res.status(503).json({ error: "ADMIN_API_TOKEN not configured" });
+  }
+  const auth = req.headers.authorization || "";
+  const provided = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (provided !== token) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  next();
+}
+
+app.post("/admin/refresh-testmode-cache", requireAdminToken, (_req, res) => {
   invalidateCache();
   res.json({ ok: true, message: "TestMode cache invalidated" });
 });
