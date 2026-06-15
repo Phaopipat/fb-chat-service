@@ -818,7 +818,8 @@ async function handleMessagingEvent(event) {
             if (_vd.ok) {
               console.log(`[AVAIL-FB] intent=${_availIntent.intent} dates=${_parsed.checkIn}..${_parsed.checkOut} hint="${_parsed.hint}"`);
               const _auth = await getGoogleAuth();
-              const _result = await _checkBayAvailFB(_auth, _parsed.checkIn, _parsed.checkOut);
+              // FB_AVAIL_V5_BAY_ARG: checkBayAvailability signature is (auth, bay, checkIn, checkOut) — pass 'any' for all bays
+              const _result = await _checkBayAvailFB(_auth, 'any', _parsed.checkIn, _parsed.checkOut);
               // FB_AVAIL_V4_RELAXED: detailed per-bay log for Excel parsing diagnosis
               const _bayDebug = Object.fromEntries(Object.entries(_result.bays || {}).map(([k, v]) => [k, {
                 a: (v.available || []).length, b: (v.booked || []).length, u: (v.unknown || []).length,
