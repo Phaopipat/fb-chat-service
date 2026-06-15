@@ -9,6 +9,7 @@
  */
 
 const { lookupKB, incrementUsage: kbIncrementUsage } = require('./knowledge-base');
+const { getPricingBlock } = require('./pricing-loader');
 
 // V97v4 — Greeting detection (mirror of LINE pattern)
 const V97V4_GREETING_RE = /^(?:(?:สวัสดี|หวัดดี|อรุณสวัสดิ์|ราตรีสวัสดิ์)(?:ครับ|ค่ะ|คะ)?|ดีครับ|ดีค่ะ|ดีจ้า|hello|hi|hey|good (morning|afternoon|evening))\s*[!.😊🙏🌊]*$/i;
@@ -1232,6 +1233,25 @@ async function generateReply({
   const userContent = `ลูกค้าชื่อ "${displayName || "ไม่ระบุ"}" พิมพ์ว่า:\n"${text}"${kbHintContext}`;
   const messages = [...history, { role: "user", content: userContent }];
 
+  // Phase G — fetch live pricing block (cross-Sheet from LINE)
+  const PRICING_SHEET_ID = process.env.PRICING_SHEET_ID || process.env.KB_SHEET_ID || process.env.GOOGLE_SHEET_ID;
+  let pricingBlock = null;
+  try {
+    if (process.env.PRICING_FROM_SHEET === "true" && PRICING_SHEET_ID) {
+      pricingBlock = await getPricingBlock({
+        sheets,
+        sheetId: PRICING_SHEET_ID,
+      });
+    }
+  } catch (err) {
+    console.warn("[Pricing] getPricingBlock error · falling back to prompt prices:", err.message);
+    pricingBlock = null;
+  }
+
+  const systemPromptWithPricing = pricingBlock
+    ? `[AUTHORITATIVE PRICING · overrides any prices in prompt body below · Source: LINE Sheet Pricing tab]\n${pricingBlock}\n\n---\n\n${FB_MVP_GUARDRAILS}\n${KAPTAN_SYSTEM_PROMPT}`
+    : `${FB_MVP_GUARDRAILS}\n${KAPTAN_SYSTEM_PROMPT}`;
+
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -1244,7 +1264,7 @@ async function generateReply({
         model: "claude-haiku-4-5-20251001",
         max_tokens: 600,
         // Stage 2.2: prepend FB MVP guardrails (no-tools, output-rule) ก่อน KAPTAN
-        system: FB_MVP_GUARDRAILS + "\n" + KAPTAN_SYSTEM_PROMPT,
+        system: systemPromptWithPricing,
         messages,
       }),
       signal: AbortSignal.timeout(25000),

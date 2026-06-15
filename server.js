@@ -29,6 +29,7 @@ const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 const { isImageRequest, matchImages } = require("./image-map");
 const { lintReply } = require("./image-lint");
 const { getKBCacheStats } = require("./knowledge-base");
+const { getPricingCacheStats } = require("./pricing-loader");
 const {
   verifySlip,
   saveSlipToBookingHold,
@@ -356,6 +357,7 @@ app.get("/", (_req, res) => {
     test_mode_cache_age_seconds: Math.round(cacheStatus.cacheAgeMs / 1000),
     test_mode_fetch_errored: cacheStatus.fetchErrored,
     kb_cache: getKBCacheStats(),
+    pricing_cache: getPricingCacheStats(),
     echo_allowlist_fallback_count: ECHO_ENABLED_PSIDS.length,
     image_host: process.env.IMAGE_HOST || "https://webhook-kohtalu-production.up.railway.app",
     slipok_branches_configured: slipokBranches.length,
