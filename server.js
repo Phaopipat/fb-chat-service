@@ -413,6 +413,27 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// V97 — after-hours mode: time-window gate via BOT_ACTIVE_HOURS env var
+// Format: "22-06" = active 22:00 to 06:00 BKK (overnight wrap)
+// Format: "9-17" = active 09:00 to 17:00 BKK (same-day)
+// Default unset: always-on (backward compatible)
+function isWithinActiveHours() {
+  const cfg = (process.env.BOT_ACTIVE_HOURS || "").trim();
+  if (!cfg) return true;
+  const m = cfg.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (!m) return true;
+  const start = parseInt(m[1], 10);
+  const end = parseInt(m[2], 10);
+  const bkkHourStr = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Bangkok",
+    hour: "numeric",
+    hour12: false,
+  });
+  const h = parseInt(bkkHourStr, 10);
+  if (start < end) return h >= start && h < end;
+  return h >= start || h < end;
+}
+
 // ─── Event handler ─────────────────────────────────────────────────────────
 async function handleMessagingEvent(event) {
   const senderId = event.sender?.id;
@@ -500,6 +521,12 @@ async function handleMessagingEvent(event) {
 
   if (!allowed) {
     console.log(`[Bot] Skipped — ${senderId} not in TestMode (active)`);
+    return;
+  }
+
+  // V97 — after-hours gate (silent during admin team active hours)
+  if (!isWithinActiveHours()) {
+    console.log(`[V97] outsideActiveHours · psid=${senderId.substring(0, 8)}`);
     return;
   }
 
