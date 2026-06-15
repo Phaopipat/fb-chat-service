@@ -58,9 +58,35 @@ function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
  * @param {string} text
  * @returns {{checkIn: string, checkOut: string, hint: string} | null}
  */
+// FB_AVAIL_V2_FIXED: relative date helper (พรุ่งนี้/วันนี้/มะรืนนี้)
+function _parseRelativeDate(text) {
+  const t = String(text);
+  const today = todayBKK();
+  // วันนี้ — risky (same-day booking) but parse · let validator decide
+  if (/วันนี้|today/i.test(t)) {
+    const iso = `${today.getUTCFullYear()}-${pad(today.getUTCMonth() + 1)}-${pad(today.getUTCDate())}`;
+    return { checkIn: iso, checkOut: addDay(iso), hint: 'relative: วันนี้' };
+  }
+  if (/พรุ่งนี้|tomorrow/i.test(t)) {
+    const iso = `${today.getUTCFullYear()}-${pad(today.getUTCMonth() + 1)}-${pad(today.getUTCDate())}`;
+    const next = addDay(iso);
+    return { checkIn: next, checkOut: addDay(next), hint: 'relative: พรุ่งนี้' };
+  }
+  if (/มะรืน(?:นี้)?|day after tomorrow/i.test(t)) {
+    const iso = `${today.getUTCFullYear()}-${pad(today.getUTCMonth() + 1)}-${pad(today.getUTCDate())}`;
+    const day2 = addDay(addDay(iso));
+    return { checkIn: day2, checkOut: addDay(day2), hint: 'relative: มะรืน' };
+  }
+  return null;
+}
+
 function parseThaiDateRange(text) {
   if (!text) return null;
   const t = String(text);
+
+  // FB_AVAIL_V2_FIXED: check relative dates FIRST (พรุ่งนี้/วันนี้/มะรืน)
+  const rel = _parseRelativeDate(t);
+  if (rel) return rel;
 
   // Build month regex alternation (longest first)
   const monthAlt = MONTH_ALTS.map(escapeRe).join('|');
