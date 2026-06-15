@@ -270,9 +270,13 @@ async function sendFbImages(psid, imageUrls) {
 }
 
 // ─── Log helpers ───────────────────────────────────────────────────────────
+// FB_BKK_TZ_FIX: return BKK-time Date (UTC + 7 hr) for log/Sheet display
+function bkkNow() { return new Date(Date.now() + 7 * 60 * 60 * 1000); }
+function bkkFromEvent(eventTs) { return new Date((eventTs || Date.now()) + 7 * 60 * 60 * 1000); }
+
 async function logOutboundRow({ customerPsid, text, mid, extra = "" }) {
   try {
-    const ts = new Date();
+    const ts = bkkNow();
     await appendRow([
       ts.toISOString(),
       ts.toISOString().slice(0, 10),
@@ -292,7 +296,7 @@ async function logOutboundRow({ customerPsid, text, mid, extra = "" }) {
 
 async function logOutboundImage({ customerPsid, imageUrl, category }) {
   try {
-    const ts = new Date();
+    const ts = bkkNow();  // FB_BKK_TZ_FIX
     await appendRow([
       ts.toISOString(),
       ts.toISOString().slice(0, 10),
@@ -458,7 +462,7 @@ async function handleMessagingEvent(event) {
     return;
   }
 
-  const ts = new Date(event.timestamp || Date.now());
+  const ts = bkkFromEvent(event.timestamp);  // FB_BKK_TZ_FIX
   const date = ts.toISOString().slice(0, 10);
   const time = ts.toISOString().slice(11, 19);
   const senderName = await getSenderName(senderId);
