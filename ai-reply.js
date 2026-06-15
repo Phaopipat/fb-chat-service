@@ -10,6 +10,18 @@
 
 const { lookupKB, incrementUsage: kbIncrementUsage } = require('./knowledge-base');
 
+// V97v4 — Greeting detection (mirror of LINE pattern)
+const V97V4_GREETING_RE = /^(?:(?:สวัสดี|หวัดดี|อรุณสวัสดิ์|ราตรีสวัสดิ์)(?:ครับ|ค่ะ|คะ)?|ดีครับ|ดีค่ะ|ดีจ้า|hello|hi|hey|good (morning|afternoon|evening))\s*[!.😊🙏🌊]*$/i;
+function isV97v4Greeting(text) {
+  if (!text || text.length > 40) return false;
+  return V97V4_GREETING_RE.test(text.trim());
+}
+
+// V97v4 — Deterministic self-ID canonical reply (bypasses LLM brevity rule)
+const V97V4_GREETING_REPLY = 'สวัสดีครับ 😊 ผมเป็นบอทช่วยทีมแอดมินครับ · ตอบคำถามทั่วไปได้ · ถ้ามีรายละเอียดเฉพาะ เจ้าหน้าที่จะตอบกลับช่วงเช้าครับ · มีอะไรให้ช่วยครับ?';
+
+let v97v4GreetingInjections = 0;
+
 const KAPTAN_SYSTEM_PROMPT = `🚨 ANTI-HALLUCINATION RULES [HALLUCINATION_DEFENSE_V38]
 1. ห้ามรวม unanswered queries · ตอบเฉพาะข้อความล่าสุด · ห้ามถาม "ขอชี้แจงหน่อย คุณหมายถึง 1. ... 2. ..."
    ✅ ตอบข้อความล่าสุดตรงๆ ❌ ห้าม clarification combining
@@ -1170,11 +1182,19 @@ async function generateReply({
   spreadsheetId,
   sheetTab,
 }) {
+  if (!text || !text.trim()) return null;
+
+  // V97v4 — Deterministic self-ID injection (bypass LLM for greetings)
+  if (isV97v4Greeting(text)) {
+    v97v4GreetingInjections++;
+    console.log(`[V97v4] greetingInjection=${v97v4GreetingInjections}`);
+    return V97V4_GREETING_REPLY;
+  }
+
   if (!apiKey) {
     console.warn("[AI] ANTHROPIC_API_KEY missing — fallback to standby");
     return standbyFor(text);
   }
-  if (!text || !text.trim()) return null;
 
   // FB Phase F (2026-06-14): KB lookup before AI gen
   // Uses KB_SHEET_ID (LINE Sheet · cross-Sheet read) for shared KnowledgeBase content.
@@ -1264,6 +1284,10 @@ module.exports = {
   standbyFor,
   detectLang,
   sanitizeReply,
+  isV97v4Greeting,
+  V97V4_GREETING_REPLY,
+  _getV97v4GreetingInjectionCount: () => v97v4GreetingInjections,
+  _resetV97v4GreetingInjectionCount: () => { v97v4GreetingInjections = 0; },
   KAPTAN_SYSTEM_PROMPT,
   FB_MVP_GUARDRAILS,
 };
