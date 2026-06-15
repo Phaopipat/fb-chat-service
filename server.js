@@ -25,6 +25,8 @@ const express = require("express");
 const crypto = require("crypto");
 const { google } = require("googleapis");
 const { generateReply } = require("./ai-reply");
+const { classifyIntent: _classifyIntentShadowFB } = require("./intent-router");  // FB_STEP3_SHADOW_WIRED
+const { logShadowDecision: _logShadowFB } = require("./intent-shadow-log");  // FB_STEP3_SHADOW_WIRED
 const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 const { isImageRequest, matchImages } = require("./image-map");
 const { lintReply } = require("./image-lint");
@@ -714,6 +716,27 @@ async function handleMessagingEvent(event) {
   }
 
   try {
+    // ── FB_STEP3_SHADOW_WIRED (Step 3 A.3 + A.3.5) ──
+    // Shadow mode · log router decision · persist to IntentShadow Sheet · no behavior change
+    if (process.env.INTENT_ROUTER_SHADOW === 'true') {
+      try {
+        const _intentDecision = _classifyIntentShadowFB(text, null);  // leadProfile null until Lead Profile ported
+        console.log(`[IR-SHADOW] psid=${senderId.substring(0, 8)} intent=${_intentDecision.intent}${_intentDecision.sub ? '/' + _intentDecision.sub : ''} handler=${_intentDecision.handler} conf=${_intentDecision.confidence} reason="${_intentDecision.reason}"`);
+        // Fire-and-forget Sheet write · never blocks reply
+        _logShadowFB({
+          sheets,
+          sheetId: GOOGLE_SHEET_ID,
+          userId: senderId,
+          msgText: text,
+          decision: _intentDecision,
+          leadProfile: null,
+        }).catch(_e => console.warn('[IR-SHADOW-LOG] async error:', _e.message));
+      } catch (_irErr) {
+        console.warn('[IR-SHADOW] classify error:', _irErr.message);
+      }
+    }
+    // ── end FB_STEP3_SHADOW_WIRED ──
+
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
       senderId,
