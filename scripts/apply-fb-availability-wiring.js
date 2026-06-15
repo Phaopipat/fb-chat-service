@@ -69,11 +69,11 @@ function _formatAvailabilityReplyFB(parsed, result) {
 }`;
 
 // Edit 2: insert availability handler RIGHT AFTER shadow log block (before generateReply)
-const HOOK_OLD = `    // ── end FB_STEP3_SHADOW_WIRED + STEP3_SHADOW_SHEET_WIRED ──
+const HOOK_OLD = `    // ── end FB_STEP3_SHADOW_WIRED ──
 
     const reply = await generateReply({`;
 
-const HOOK_NEW = `    // ── end FB_STEP3_SHADOW_WIRED + STEP3_SHADOW_SHEET_WIRED ──
+const HOOK_NEW = `    // ── end FB_STEP3_SHADOW_WIRED ──
 
     // ── ${MARKER} — availability check before AI gen ──
     if (process.env.AVAILABILITY_CHECK_ENABLED !== 'false' && messageType === 'text') {

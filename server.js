@@ -33,6 +33,37 @@ const {
   classifyMessage: _classifyLPMsgFB,
   saveLeadProfile: _saveLPFB,
 } = require("./lead-profile");  // FB_STEP2_LEAD_PROFILE_WIRED
+// FB_AVAILABILITY_WIRED
+const { checkBayAvailability: _checkBayAvailFB, validateDates: _validateDatesFB, SELECTED_ROOMS: _SELECTED_ROOMS_FB } = require("./availability-checker");
+const { parseThaiDateRange: _parseThaiDateRangeFB } = require("./fb-date-parser");
+
+// Format availability result as customer-facing reply
+function _formatAvailabilityReplyFB(parsed, result) {
+  const { checkIn, checkOut, bays, totalAvailable } = result;
+  const dateStr = checkIn === checkOut || (new Date(checkOut) - new Date(checkIn)) === 86_400_000
+    ? checkIn
+    : `${checkIn} ถึง ${checkOut}`;
+
+  if (totalAvailable === 0) {
+    return `ช่วง ${dateStr} ห้องเต็มแล้วครับ 😔 ขอแอดมินช่วยเช็ควันอื่นใกล้เคียงให้ครับ 🙏`;
+  }
+
+  const parts = [`ช่วง ${dateStr} ครับ 😊`];
+  const bayNames = ['อ่าวมุก', 'อ่าวใหญ่'];
+  for (const bay of bayNames) {
+    const b = bays[bay];
+    if (!b) continue;
+    if (b.available.length > 0) {
+      const emoji = bay === 'อ่าวมุก' ? '🛖' : '🏠';
+      parts.push(`${emoji} ${bay}: ยังมีห้องว่างครับ`);
+    } else if (b.booked.length > 0) {
+      const emoji = bay === 'อ่าวมุก' ? '🛖' : '🏠';
+      parts.push(`${emoji} ${bay}: เต็มแล้ว`);
+    }
+  }
+  parts.push('มาทั้งหมดกี่ท่านครับ? ผมจะแนะนำห้องที่เหมาะสมให้');
+  return parts.join('\n');
+}
 const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 const { isImageRequest, matchImages } = require("./image-map");
 const { lintReply } = require("./image-lint");
@@ -761,6 +792,34 @@ async function handleMessagingEvent(event) {
       }
     }
     // ── end FB_STEP3_SHADOW_WIRED ──
+
+    // ── FB_AVAILABILITY_WIRED — availability check before AI gen ──
+    if (process.env.AVAILABILITY_CHECK_ENABLED !== 'false' && messageType === 'text') {
+      try {
+        const _availIntent = _classifyIntentShadowFB(text, _leadProfileFB);
+        if (_availIntent.intent === 'AVAILABILITY') {
+          const _parsed = _parseThaiDateRangeFB(text);
+          if (_parsed) {
+            const _vd = _validateDatesFB(_parsed.checkIn, _parsed.checkOut);
+            if (_vd.ok) {
+              console.log(`[AVAIL-FB] intent=AVAILABILITY dates=${_parsed.checkIn}..${_parsed.checkOut} hint="${_parsed.hint}"`);
+              const _auth = await getGoogleAuth();
+              const _result = await _checkBayAvailFB(_auth, _parsed.checkIn, _parsed.checkOut);
+              const _availReply = _formatAvailabilityReplyFB(_parsed, _result);
+              await sendAndLog(senderId, _availReply);
+              return;  // skip generateReply
+            } else {
+              console.log(`[AVAIL-FB] dates invalid: ${_vd.reason} · fall through to AI`);
+            }
+          } else {
+            console.log(`[AVAIL-FB] no parseable dates in "${text.substring(0, 50)}" · fall through to AI`);
+          }
+        }
+      } catch (_availErr) {
+        console.warn('[AVAIL-FB] error · falling through:', _availErr.message);
+      }
+    }
+    // ── end FB_AVAILABILITY_WIRED ──
 
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
