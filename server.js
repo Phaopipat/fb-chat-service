@@ -46,11 +46,10 @@ function _formatAvailabilityReplyFB(parsed, result) {
   const oneNight = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) === 86_400_000;
   const dateStr = oneNight ? checkIn : `${checkIn} ถึง ${checkOut}`;
 
-  // FB_AVAIL_V3_UNKNOWN: if all rooms = unknown (Drive read fail) · escalate · don't say "เต็ม"
-  const allUnknown = totalAvailable === 0 && hasUnknown &&
-    Object.values(bays).every(b => (b.available?.length || 0) === 0 && (b.booked?.length || 0) === 0);
-  if (allUnknown) {
-    console.warn(`[AVAIL-FB] hasUnknown=true · likely Drive read fail · dates=${dateStr}`);
+  // FB_AVAIL_V3_UNKNOWN + FB_AVAIL_V4_RELAXED: relaxed — any (totalAvailable=0 && hasUnknown) → uncertain · escalate
+  // Excel parsing can mis-detect rooms (gray cells, admin markings) · safer to escalate than lie "เต็ม"
+  if (totalAvailable === 0 && hasUnknown) {
+    console.warn(`[AVAIL-FB] uncertain · totalAvailable=0 + hasUnknown=true · escalate · dates=${dateStr}`);
     return `ขอเช็คห้องว่างกับแอดมินช่วง ${dateStr} ก่อนนะครับ 🙏 รบกวนรอสักครู่ครับ`;
   }
 
@@ -820,8 +819,13 @@ async function handleMessagingEvent(event) {
               console.log(`[AVAIL-FB] intent=${_availIntent.intent} dates=${_parsed.checkIn}..${_parsed.checkOut} hint="${_parsed.hint}"`);
               const _auth = await getGoogleAuth();
               const _result = await _checkBayAvailFB(_auth, _parsed.checkIn, _parsed.checkOut);
-              // FB_AVAIL_V3_UNKNOWN: log result breakdown for diagnosis
-              console.log(`[AVAIL-FB] result · totalAvailable=${_result.totalAvailable} hasUnknown=${_result.hasUnknown} bays=${JSON.stringify(_result.bays).substring(0,200)}`);
+              // FB_AVAIL_V4_RELAXED: detailed per-bay log for Excel parsing diagnosis
+              const _bayDebug = Object.fromEntries(Object.entries(_result.bays || {}).map(([k, v]) => [k, {
+                a: (v.available || []).length, b: (v.booked || []).length, u: (v.unknown || []).length,
+                ids: { a: (v.available || []).slice(0,3), b: (v.booked || []).slice(0,3), u: (v.unknown || []).slice(0,3) },
+              }]));
+              console.log(`[AVAIL-FB] result · totalAvailable=${_result.totalAvailable} hasUnknown=${_result.hasUnknown}`);
+              console.log(`[AVAIL-FB] bays detail: ${JSON.stringify(_bayDebug)}`);
               const _availReply = _formatAvailabilityReplyFB(_parsed, _result);
               await sendAndLog(senderId, _availReply);
               return;  // skip generateReply
