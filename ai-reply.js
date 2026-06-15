@@ -1424,7 +1424,8 @@ async function generateReply({
           if (kbIncrementUsage) {
             kbIncrementUsage({ sheets, sheetId: KB_SHEET_ID, id: kbHit.id }).catch(() => {});
           }
-          return { text: kbHit.answer || kbHit.text, mode: 'kb_answer', kbId: kbHit.id, attachments: [] };
+          // V41.3-FB v2 fix: return STRING (not object) · matches existing KB direct path at L1454
+          return kbHit.answer || kbHit.text || '';
         }
         console.warn(`[V41.3-FB] cancel context but KB-KB-20260615-005 not in cache`);
       } catch (_v413err) {
