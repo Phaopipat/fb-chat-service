@@ -27,6 +27,12 @@ const { google } = require("googleapis");
 const { generateReply } = require("./ai-reply");
 const { classifyIntent: _classifyIntentShadowFB } = require("./intent-router");  // FB_STEP3_SHADOW_WIRED
 const { logShadowDecision: _logShadowFB } = require("./intent-shadow-log");  // FB_STEP3_SHADOW_WIRED
+const {
+  isLeadProfileEnabled: _isLPEnabledFB,
+  loadLeadProfile: _loadLPFB,
+  classifyMessage: _classifyLPMsgFB,
+  saveLeadProfile: _saveLPFB,
+} = require("./lead-profile");  // FB_STEP2_LEAD_PROFILE_WIRED
 const { isAllowed, getCacheStatus, invalidateCache } = require("./test-mode");
 const { isImageRequest, matchImages } = require("./image-map");
 const { lintReply } = require("./image-lint");
@@ -715,12 +721,31 @@ async function handleMessagingEvent(event) {
     }
   }
 
+  // ── FB_STEP2_LEAD_PROFILE_WIRED (Step 2) ──
+  // Load + classify lead profile (gated on LEAD_PROFILE_ENABLED) · before reply
+  let _leadProfileFB = null;
+  let _leadMutationsFB = null;
+  if (_isLPEnabledFB() && messageType === "text") {
+    try {
+      _leadProfileFB = await _loadLPFB(senderId, "FB");
+      if (senderName && _leadProfileFB.displayName !== senderName) {
+        _leadProfileFB.displayName = senderName;
+      }
+      _leadMutationsFB = _classifyLPMsgFB(text, _leadProfileFB);
+      Object.assign(_leadProfileFB, _leadMutationsFB);
+    } catch (err) {
+      console.warn("[LP-FB] load/classify error:", err.message);
+      _leadProfileFB = null;
+    }
+  }
+  // ── end FB_STEP2_LEAD_PROFILE_WIRED (Step 2 load) ──
+
   try {
     // ── FB_STEP3_SHADOW_WIRED (Step 3 A.3 + A.3.5) ──
     // Shadow mode · log router decision · persist to IntentShadow Sheet · no behavior change
     if (process.env.INTENT_ROUTER_SHADOW === 'true') {
       try {
-        const _intentDecision = _classifyIntentShadowFB(text, null);  // leadProfile null until Lead Profile ported
+        const _intentDecision = _classifyIntentShadowFB(text, _leadProfileFB);  // FB_STEP2_LEAD_PROFILE_WIRED: pass lead profile
         console.log(`[IR-SHADOW] psid=${senderId.substring(0, 8)} intent=${_intentDecision.intent}${_intentDecision.sub ? '/' + _intentDecision.sub : ''} handler=${_intentDecision.handler} conf=${_intentDecision.confidence} reason="${_intentDecision.reason}"`);
         // Fire-and-forget Sheet write · never blocks reply
         _logShadowFB({
@@ -729,7 +754,7 @@ async function handleMessagingEvent(event) {
           userId: senderId,
           msgText: text,
           decision: _intentDecision,
-          leadProfile: null,
+          leadProfile: _leadProfileFB,  // FB_STEP2_LEAD_PROFILE_WIRED: pass lead profile for stage column
         }).catch(_e => console.warn('[IR-SHADOW-LOG] async error:', _e.message));
       } catch (_irErr) {
         console.warn('[IR-SHADOW] classify error:', _irErr.message);
@@ -768,6 +793,37 @@ async function handleMessagingEvent(event) {
     if (finalText && finalText.trim()) {
       await sendAndLog(senderId, finalText);
     }
+
+    // ── FB_STEP2_LEAD_PROFILE_WIRED (Step 2 save) ──
+    // Persist lead profile mutations after reply · queued · non-blocking
+    if (_isLPEnabledFB() && _leadProfileFB && messageType === "text") {
+      try {
+        const nowIso = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString();
+        const replyContainsPrice = /\d{1,3}(?:,\d{3})+\s*(?:฿|บาท|baht)|\d{4,5}\s*(?:฿|บาท|baht)/i.test(reply || '');
+        const saveMutations = {
+          ...(_leadMutationsFB || {}),
+          platform: "FB",
+          displayName: senderName,
+          last_inbound: nowIso,
+          updated_at: nowIso,
+          inbound_count:   (_leadProfileFB.inbound_count   || 0) + 1,
+          bot_reply_count: (_leadProfileFB.bot_reply_count || 0) + 1,
+        };
+        if (!_leadProfileFB.first_contact) saveMutations.first_contact = nowIso;
+        if (replyContainsPrice) {
+          saveMutations.bot_last_quote_at = nowIso;
+          if (!["booking", "won", "lost"].includes(_leadProfileFB.stage)) {
+            saveMutations.stage = "quoting";
+          }
+        }
+        _saveLPFB(senderId, saveMutations).catch(err =>
+          console.warn("[LP-FB] saveLeadProfile error:", err.message)
+        );
+      } catch (err) {
+        console.warn("[LP-FB] post-reply save error:", err.message);
+      }
+    }
+    // ── end FB_STEP2_LEAD_PROFILE_WIRED (Step 2 save) ──
   } catch (err) {
     console.error("[AI] handleMessagingEvent error:", err.message);
   }
