@@ -46,11 +46,11 @@ function _formatAvailabilityReplyFB(parsed, result) {
   const oneNight = (new Date(checkOut).getTime() - new Date(checkIn).getTime()) === 86_400_000;
   const dateStr = oneNight ? checkIn : `${checkIn} ถึง ${checkOut}`;
 
-  // FB_AVAIL_V3_UNKNOWN + FB_AVAIL_V4_RELAXED: relaxed — any (totalAvailable=0 && hasUnknown) → uncertain · escalate
-  // Excel parsing can mis-detect rooms (gray cells, admin markings) · safer to escalate than lie "เต็ม"
+  // FB_AVAIL_V6_FALLTHROUGH: when Drive read returns 0/unknown, return null → caller falls through to generateReply
+  // This matches LINE bot's graceful AI-driven conversation (asks nights/pax/bay clarification)
   if (totalAvailable === 0 && hasUnknown) {
-    console.warn(`[AVAIL-FB] uncertain · totalAvailable=0 + hasUnknown=true · escalate · dates=${dateStr}`);
-    return `ขอเช็คห้องว่างกับแอดมินช่วง ${dateStr} ก่อนนะครับ 🙏 รบกวนรอสักครู่ครับ`;
+    console.warn(`[AVAIL-FB] uncertain · totalAvailable=0 + hasUnknown=true · fall through to AI · dates=${dateStr}`);
+    return null;  // signal caller to skip direct send + use generateReply instead
   }
 
   if (totalAvailable === 0) {
@@ -828,8 +828,12 @@ async function handleMessagingEvent(event) {
               console.log(`[AVAIL-FB] result · totalAvailable=${_result.totalAvailable} hasUnknown=${_result.hasUnknown}`);
               console.log(`[AVAIL-FB] bays detail: ${JSON.stringify(_bayDebug)}`);
               const _availReply = _formatAvailabilityReplyFB(_parsed, _result);
-              await sendAndLog(senderId, _availReply);
-              return;  // skip generateReply
+              if (_availReply) {
+                await sendAndLog(senderId, _availReply);
+                return;  // skip generateReply
+              }
+              // FB_AVAIL_V6_FALLTHROUGH: null from formatter → fall through to generateReply for AI conversation
+              console.log('[AVAIL-FB] formatter returned null · fall through to AI gen');
             } else {
               console.log(`[AVAIL-FB] dates invalid: ${_vd.reason} · fall through to AI`);
             }
