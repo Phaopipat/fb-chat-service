@@ -25,6 +25,10 @@ const express = require("express");
 const crypto = require("crypto");
 const { google } = require("googleapis");
 const { generateReply } = require("./ai-reply");
+const observability = require("./observability");  // FB_OBSERVABILITY_WIRED
+const { getLeadProfileStats } = require("./lead-profile");  // FB_OPS_ENDPOINTS_WIRED
+const { getStats: getSheetQueueStats } = require("./sheets-helper");  // FB_OPS_ENDPOINTS_WIRED
+const { tryLateEmailCapture } = require("./late-email-handler");  // FB_LATE_EMAIL_WIRED
 const { classifyIntent: _classifyIntentShadowFB } = require("./intent-router");  // FB_STEP3_SHADOW_WIRED
 const { logShadowDecision: _logShadowFB } = require("./intent-shadow-log");  // FB_STEP3_SHADOW_WIRED
 const {
@@ -170,13 +174,21 @@ async function getSheets() {
 }
 
 async function appendRow(values) {
-  const sheets = await getSheets();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${SHEET_TAB}!A:Z`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [values] },
-  });
+  // FB_OBSERVABILITY_WIRED — counters on success/error
+  try {
+    const sheets = await getSheets();
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${SHEET_TAB}!A:Z`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [values] },
+    });
+    observability.increment("sheetAppendOk");
+  } catch (err) {
+    observability.increment("sheetAppendError");
+    observability.recordError("sheetAppend", err);
+    throw err;
+  }
 }
 
 // ─── FB profile cache ──────────────────────────────────────────────────────
@@ -454,6 +466,164 @@ app.post("/admin/refresh-testmode-cache", requireAdminToken, (_req, res) => {
   res.json({ ok: true, message: "TestMode cache invalidated" });
 });
 
+// ─── FB_OPS_ENDPOINTS_WIRED — observability/ops endpoints (E11 gated except /healthz) ───
+// FB Messages tab schema (10 cols A:J):
+//   0=ts 1=date 2=time 3=psid 4=displayName 5=messageType 6=text 7=extra 8=mid 9=senderType
+// PSIDs are 16-digit numerics — mask if pre-existing truncated rows leak via col F.
+app.get("/healthz", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "fb-chat-service",
+    uptimeSec: observability.getRuntimeSnapshot().uptimeSec,
+  });
+});
+
+app.get("/readyz", requireAdminToken, async (req, res) => {
+  const checks = {
+    config: observability.getConfigSnapshot(),
+    sheets: {
+      configured: !!GOOGLE_SHEET_ID && !!GOOGLE_SERVICE_ACCOUNT_JSON,
+      ok: null,
+      latencyMs: null,
+      error: "",
+    },
+  };
+
+  const deep = req.query.deep === "1" || req.query.deep === "true";
+  if (deep && checks.sheets.configured) {
+    const started = Date.now();
+    try {
+      const sheets = await getSheets();
+      await Promise.race([
+        sheets.spreadsheets.values.get({
+          spreadsheetId: GOOGLE_SHEET_ID,
+          range: `${SHEET_TAB}!A1:A1`,
+        }),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Sheets readiness timeout")), 2500)
+        ),
+      ]);
+      checks.sheets.ok = true;
+      checks.sheets.latencyMs = Date.now() - started;
+    } catch (err) {
+      checks.sheets.ok = false;
+      checks.sheets.latencyMs = Date.now() - started;
+      checks.sheets.error = err.message;
+      observability.recordError("readyz.sheets", err);
+    }
+  }
+
+  const missing =
+    !checks.config.sheetIdConfigured ||
+    !checks.config.serviceAccountConfigured ||
+    !checks.config.fbVerifyTokenConfigured ||
+    !checks.config.fbPageTokenConfigured;
+  const deepFail = deep && checks.sheets.configured && checks.sheets.ok === false;
+  const ok = !missing && !deepFail;
+
+  res.status(ok ? 200 : 503).json({
+    ok,
+    deep,
+    checks,
+    runtime: observability.getRuntimeSnapshot(),
+    sheetQueue: getSheetQueueStats(),
+    leadProfile: getLeadProfileStats(),
+  });
+});
+
+app.get("/runtime-status", requireAdminToken, (_req, res) => {
+  res.json({
+    ok: true,
+    runtime: observability.getRuntimeSnapshot(),
+    config: observability.getConfigSnapshot(),
+    sheetQueue: getSheetQueueStats(),
+    leadProfile: getLeadProfileStats(),
+  });
+});
+
+app.get("/bot-stats", requireAdminToken, (_req, res) => {
+  const snap = observability.getRuntimeSnapshot();
+  res.json({
+    botEnabled: BOT_ENABLED,
+    autoReplyEnabled: BOT_ENABLED && !!ANTHROPIC_API_KEY && !!FB_PAGE_ACCESS_TOKEN,
+    counters: snap.counters,
+    uptimeSec: snap.uptimeSec,
+  });
+});
+
+app.get("/stats", requireAdminToken, async (_req, res) => {
+  try {
+    const sheets = await getSheets();
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${SHEET_TAB}!A2:J`,
+    });
+    const allRows = result.data.values || [];
+    const rows = allRows.filter((r) => r[9] !== "bot_silent_test_mode");
+    const total = rows.length;
+    const totalIncludingSilent = allRows.length;
+    const users = [...new Set(rows.map((r) => r[3]))].filter(Boolean);
+    const msgTypes = {};
+    const dateCount = {};
+    const senderCount = {};
+
+    for (const r of rows) {
+      const rawType = r[5] || "unknown";
+      // mask any FB PSID that leaked into col F (defense-in-depth)
+      const type = /^\d{15,17}$/.test(rawType) ? "unknown" : rawType;
+      msgTypes[type] = (msgTypes[type] || 0) + 1;
+      const d = r[1] || "unknown";
+      dateCount[d] = (dateCount[d] || 0) + 1;
+      const s = r[9] || "";
+      if (s) senderCount[s] = (senderCount[s] || 0) + 1;
+    }
+
+    res.json({
+      totalMessages: total,
+      totalIncludingSilent,
+      uniqueUsers: users.length,
+      messageTypes: msgTypes,
+      dailyMessages: dateCount,
+      senderBreakdown: senderCount,
+      lastUpdated: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/recent", requireAdminToken, async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit || "50", 10);
+    const includeSilent = req.query.includeSilent === "1";
+    const sheets = await getSheets();
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: `${SHEET_TAB}!A2:J`,
+    });
+    const allRows = result.data.values || [];
+    const filtered = includeSilent
+      ? allRows
+      : allRows.filter((r) => r[9] !== "bot_silent_test_mode");
+    const rows = filtered.slice(-limit).reverse();
+    const messages = rows.map((r) => ({
+      timestamp: r[0],
+      date: r[1],
+      time: r[2],
+      psid: r[3],
+      displayName: r[4],
+      messageType: r[5],
+      messageText: r[6],
+      extra: r[7],
+      mid: r[8],
+      senderType: r[9],
+    }));
+    res.json({ messages, count: messages.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -465,6 +635,7 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", async (req, res) => {
+  observability.increment("webhookReceived");  // FB_OBSERVABILITY_WIRED
   res.sendStatus(200);
   if (!isValidSignature(req)) {
     console.warn("❌ Invalid signature");
@@ -685,6 +856,29 @@ async function handleMessagingEvent(event) {
     if (!collectorResult?.handled) {
       console.log(`[Collector] Not handled · session active but message type ${messageType} ignored`);
       return;
+    }
+  }
+
+  // ─── FB_LATE_EMAIL_WIRED — late-arrival email capture (text-only) ─────────
+  if (messageType === "text" && text) {
+    try {
+      const lateRes = await tryLateEmailCapture({
+        senderId,
+        msgText: text,
+        auth,
+        sheetId: GOOGLE_SHEET_ID,
+      });
+      if (lateRes?.handled && lateRes.replyText) {
+        await sendAndLog(
+          senderId,
+          lateRes.replyText,
+          JSON.stringify({ topic: "bot:late_email_capture", bookingRef: lateRes.bookingRef || "" })
+        );
+        console.log(`[late-email] handled · psid=${senderId} email=${lateRes.email || ""}`);
+        return;
+      }
+    } catch (err) {
+      console.warn("[late-email] error (non-blocking):", err.message);
     }
   }
 
@@ -929,6 +1123,18 @@ async function handleMessagingEvent(event) {
     console.error("[AI] handleMessagingEvent error:", err.message);
   }
 }
+
+// ─── FB_OBSERVABILITY_WIRED — process error hooks ──────────────────────────────────────
+process.on("uncaughtException", (err) => {
+  observability.increment("uncaughtException");
+  observability.recordError("uncaughtException", err);
+  console.error("[observability] uncaughtException:", err && err.message);
+});
+process.on("unhandledRejection", (err) => {
+  observability.increment("unhandledRejection");
+  observability.recordError("unhandledRejection", err);
+  console.error("[observability] unhandledRejection:", err && err.message);
+});
 
 // ─── Boot ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
