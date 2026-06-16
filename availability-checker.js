@@ -307,10 +307,35 @@ async function findRoomLocation(auth, spreadsheetId, roomCode) {
 }
 
 // ─── Parse DATE cell: "5-7" → {checkIn:5, checkOut:7} ────────────────────────
+// V100e · also accept single-day format "31" → {checkIn:31, checkOut:32 (next day)}
+//        used for end-of-month rows like row 33 "31" carrying Peak DMC block notes
 function parseDateCell(raw) {
-  const m = String(raw || '').trim().match(/^(\d{1,2})-(\d{1,2})$/);
-  if (!m) return null;
-  return { checkIn: parseInt(m[1], 10), checkOut: parseInt(m[2], 10) };
+  const t = String(raw || '').trim();
+  // Range "N-N" (existing)
+  const m = t.match(/^(\d{1,2})-(\d{1,2})$/);
+  if (m) return { checkIn: parseInt(m[1], 10), checkOut: parseInt(m[2], 10) };
+  // V100e · Single day "N" → block that single day (checkout = day+1, may cross month)
+  const s = t.match(/^(\d{1,2})$/);
+  if (s) {
+    const day = parseInt(s[1], 10);
+    if (day >= 1 && day <= 31) return { checkIn: day, checkOut: day + 1 };
+  }
+  return null;
+}
+
+// ─── V100e · Detect block-all-rooms pattern in any cell of a row ─────────────
+// Used for full-row blocks like "ขอblock ห้องของPeak DMC 16rms Manila Deluxe Chalet"
+// where admin writes one cell of text + visual color to mark all rooms unavailable.
+// Conservative: require both "block" keyword AND ("rms" capacity hint OR "ห้อง"/"room")
+const _BLOCK_KEYWORD_RE = /\bblock\b|บล็อก|ปิดรับ|งดรับ/i;
+const _BLOCK_SUPPORT_RE = /\d+\s*rms?\b|ห้อง|room/i;
+function isBlockedRow(row) {
+  for (const cell of row) {
+    const t = String(cell || '');
+    if (t.length < 5) continue;
+    if (_BLOCK_KEYWORD_RE.test(t) && _BLOCK_SUPPORT_RE.test(t)) return true;
+  }
+  return false;
 }
 
 // ─── Convert parsed cell + year/month to absolute JS Dates ───────────────────
@@ -401,6 +426,11 @@ async function checkOneRoom(auth, roomCode, checkInStr, checkOutStr) {
 
       const { bookingIn, bookingOut } = cellToAbsoluteDates(parsed, year, month);
       if (!overlaps(bookingIn, bookingOut, checkIn, checkOut)) continue;
+
+      // V100e · Block-all pattern (e.g. "ขอblock Peak DMC 16rms") → all rooms in row booked
+      if (isBlockedRow(row)) {
+        return { available: false, reason: 'row_block_all' };
+      }
 
       // Booking overlaps our requested period — check if room cell is filled
       const roomCell = (row[location.colIdx] || '').trim();
