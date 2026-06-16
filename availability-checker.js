@@ -193,24 +193,40 @@ function getSheetName(date) {
 }
 
 // ─── Drive: find spreadsheet by name ─────────────────────────────────────────
+// V100c · (1) Cache negative results (id=null) to reduce log spam + Drive API calls
+//        (2) Fall back to "New <name>" prefix if exact match misses
+//            (handles Phao's workflow where new sheets are created with "New " prefix)
 async function findSpreadsheetId(auth, sheetName) {
   const cached = _spreadsheetIdCache.get(sheetName);
-  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.id;
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.id; // null cached OK
 
   const drive = google.drive({ version: 'v3', auth });
-  const res = await drive.files.list({
-    q: `name='${sheetName}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`,
+  const baseQuery = `mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`;
+  const listParams = {
     fields: 'files(id,name)',
     pageSize: 5,
     orderBy: 'modifiedTime desc',
     includeItemsFromAllDrives: true,
     supportsAllDrives: true,
     corpora: 'allDrives',
-  });
+  };
 
-  const files = res.data.files || [];
+  // Try exact match first
+  let res = await drive.files.list({ q: `name='${sheetName}' and ${baseQuery}`, ...listParams });
+  let files = res.data.files || [];
+
+  // V100c · fallback to "New <sheetName>" prefix
   if (!files.length) {
-    console.warn(`[availability] Sheet not found in Drive: "${sheetName}"`);
+    res = await drive.files.list({ q: `name='New ${sheetName}' and ${baseQuery}`, ...listParams });
+    files = res.data.files || [];
+    if (files.length) {
+      console.log(`[availability] Resolved via "New " prefix: "New ${sheetName}" → ${files[0].id}`);
+    }
+  }
+
+  if (!files.length) {
+    console.warn(`[availability] Sheet not found in Drive: "${sheetName}" (also tried "New ${sheetName}")`);
+    _spreadsheetIdCache.set(sheetName, { id: null, ts: Date.now() }); // V100c · cache null
     return null;
   }
   const id = files[0].id;
