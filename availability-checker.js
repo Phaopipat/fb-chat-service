@@ -15,15 +15,75 @@ const THAI_MONTH_ABBR = [
 const MAX_BOOKING_DAYS = 270; // 9 months · covers typical advance booking window (raised from 90 days · AREÉ Stage A 2026-05-24 evidence: customer "23 ต.ค." 5 months out got too_far → escalated → lost booking)
 const CACHE_TTL_MS = 300_000; // V99 · 5 min · quota relief (was 60s · hit limit on concurrent checks)
 
-// ─── Selected rooms from Excel analysis (F=1) — Phase 2 scope ────────────────
-// Only these rooms are surfaced to customers via the bot
+// ─── V100a · Deterministic tab routing for all 60 bookable rooms ───────────────
+// Replaces auto-detection by header text (which had -1 offset bug in Pearl Bay Home)
+// Future V100b will expand SELECTED_ROOMS to use this · for now only existing 12 use it
+const ROOM_TAB_MAP = {
+  big_bay_deluxe: {
+    tabTitle: 'Big Bay Deluxe',
+    dataStartRow: 3,
+    headerRow: 2,
+    rooms: {
+      D1: 2, D2: 3, D3: 4, D4: 5, D5: 6, D6: 7, D7: 8, D8: 9,
+      D9: 10, D10: 11, D11: 12, D12: 13, D13: 14, D14: 15, D15: 16, D16: 17,
+    },
+  },
+  big_bay_thai: {
+    tabTitle: 'Big Bay Thai',
+    dataStartRow: 3,
+    headerRow: 2,
+    rooms: {
+      T1: 2, T2: 3, T3: 4, T4: 5, T5: 6, T6: 7, T7: 8, T8: 9,
+      T9: 10, T10: 11, T11: 12, T12: 13, T13: 14, T14: 15, T15: 16,
+      T16: 17, T17: 18, T18: 19,
+      // V20=ผู้บริหาร, V21=ผู้บริหาร skipped
+      D17: 22, D18: 23,  // Honeymoon Ocean Front co-located in Thai tab
+    },
+  },
+  pearl_bay_home: {
+    tabTitle: 'Pearl Bay Home',
+    dataStartRow: 4,  // V100a FIX: was 3 in old code (read code header row as data)
+    headerRow: 3,
+    rooms: {
+      R20: 2, R21: 3, R22: 4, R23: 5, R24: 6, R25: 7, R26: 8, R27: 9,
+      R28: 10, R29: 11, R30: 12, R31: 13, R32: 14, R33: 15, R34: 16,
+      // V100a FIX -1 offset: was R21:2 R31:12 R33:14 R34:15 (reading wrong header)
+      //                     now R21:3 R31:13 R33:15 R34:16 (header-aligned to "21" "31" "33" "34")
+    },
+  },
+  pearl_bay_beach_chalet: {
+    tabTitle: 'Pearl Bay Beach Chalet',
+    dataStartRow: 3,
+    headerRow: 2,
+    rooms: {
+      R10: 2, R11: 3, R12: 4, R13: 5, R14: 6, R15: 7, R16: 8, R17: 9, R18: 10,
+    },
+  },
+};
+
+// V100a · helper: look up tab + col + dataStartRow for a room code
+function getRoomLocation(roomCode) {
+  for (const [, config] of Object.entries(ROOM_TAB_MAP)) {
+    if (Object.prototype.hasOwnProperty.call(config.rooms, roomCode)) {
+      return {
+        tabTitle: config.tabTitle,
+        colIdx: config.rooms[roomCode],
+        dataStartRow: config.dataStartRow,
+      };
+    }
+  }
+  return null;
+}
+
+// V100a · Existing 12 rooms - SAME LIST, BUT cell positions now header-aligned
+// (V100b will expand to 60 rooms · this commit keeps customer-facing pool small)
 const SELECTED_ROOMS = {
-  // Ao Muk (Pearl Bay) — Pearl Bay Homes tab
-  R21: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },
-  R31: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },
-  R33: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },
-  R34: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },
-  // Ao Yai (Big Bay) — Thai Style tab
+  // Pearl Bay Home — V100a OFFSET FIX (was reading -1 column · now header-aligned)
+  R21: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },  // was col 2 → now col 3
+  R31: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },  // was col 12 → now col 13
+  R33: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },  // was col 14 → now col 15
+  R34: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },  // was col 15 → now col 16
+  // Big Bay Thai — unchanged (was already correct)
   T5:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
   T6:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
   T7:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
@@ -137,39 +197,15 @@ async function findRoomLocation(auth, spreadsheetId, roomCode) {
   const cached = _roomLocationCache.get(key);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.loc;
 
-  const tabTitles = await getAllTabTitles(auth, spreadsheetId);
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  for (const tabTitle of tabTitles) {
-    let headerRows;
-    try {
-      // Read first 3 rows — Thai Style tab has a merged title in row 1, columns in row 2
-      const res = await sheets.spreadsheets.values.get({
-        spreadsheetId,
-        range: `'${tabTitle}'!1:3`,
-      });
-      headerRows = res.data.values || [];
-    } catch (_) {
-      continue;
-    }
-
-    for (let rowIdx = 0; rowIdx < headerRows.length; rowIdx++) {
-      const colIdx = findRoomColInHeader(headerRows[rowIdx], roomCode);
-      if (colIdx >= 0) {
-        const loc = {
-          tabTitle,
-          colIdx,
-          dataStartRow: rowIdx + 1, // 0-indexed row where booking data begins
-        };
-        _roomLocationCache.set(key, { loc, ts: Date.now() });
-        console.log(`[availability] ${roomCode} → tab:"${tabTitle}" col:${colIdx} dataStart:${loc.dataStartRow}`);
-        return loc;
-      }
-    }
+  const loc = getRoomLocation(roomCode);
+  if (!loc) {
+    console.warn(`[availability] Room not in ROOM_TAB_MAP: ${roomCode}`);
+    return null;
   }
 
-  console.warn(`[availability] ${roomCode} not found in any tab of ${spreadsheetId}`);
-  return null;
+  _roomLocationCache.set(key, { loc, ts: Date.now() });
+  console.log(`[availability] ${roomCode} → tab:"${loc.tabTitle}" col:${loc.colIdx} dataStart:${loc.dataStartRow}`);
+  return loc;
 }
 
 // ─── Parse DATE cell: "5-7" → {checkIn:5, checkOut:7} ────────────────────────
@@ -362,6 +398,8 @@ module.exports = {
   checkBayAvailability,
   validateDates,
   invalidateCache,
+  ROOM_TAB_MAP,
   SELECTED_ROOMS,
+  getRoomLocation,
   MAX_BOOKING_DAYS,
 };
