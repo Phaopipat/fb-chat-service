@@ -104,6 +104,7 @@ const ACTIVITY = {
 const LOCATION = {
   island:          folderUrls('location',       'location'),
   'mainland-pier': folderUrls('mainland-pier',  'mainland-pier'),
+  'baan-maprao':   folderUrls('mainland/baan-maprao', 'mainland/baan-maprao'),  // Train pickup campaign 2026-06-15 · Day Use bungalow
 };
 // ── Room number → folder key ──────────────────────────────────────────────────
 // Maps individual room number → which folder group it belongs to.
@@ -363,6 +364,12 @@ function matchImages(text) {
   if (/แผนที่|ที่ตั้ง|เกาะอยู่ที่ไหน|location|map|ทำเล/i.test(t)) {
     const images = lookupByLocation('island');
     if (images.length) return { images, caption: 'รูปแสดงที่ตั้งเกาะทะลุครับ 📍' };
+  }
+  // ── Baan Maprao bungalow (mainland Day Use room) — Train pickup campaign 2026-06-15 ──
+  // Must come BEFORE pier branch · disambiguates Day Use bungalow from boat pier
+  if (/บ้านมะพร้าว.*(?:day\s*use|day-use|รายวัน|บังกะโล|พักรอ|พัก|ห้องพัก|รอ\s*รถ)|baan\s*maprao|ห้องบ้านมะพร้าว|บังกะโลฝั่ง|ฝั่งแผ่นดิน.*ห้อง/i.test(t)) {
+    const images = lookupByLocation('baan-maprao');
+    if (images.length) return { images: images.slice(0, 5), caption: 'รูปบ้านมะพร้าว · ห้องพักริมทะเลฝั่งแผ่นดิน (Day Use) ครับ 🌊🌴' };
   }
   // ── Mainland pier / ท่าเรือ ───────────────────────────────────────────────
   if (/ท่าเรือ|บ้านมะพร้าว|จุดขึ้นเรือ|pier|mainland|ขึ้นเรือ/i.test(t)) {
