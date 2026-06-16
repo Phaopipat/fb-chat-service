@@ -208,6 +208,41 @@ async function appendRow(values) {
   }
 }
 
+// ─── V99fb-retry · transient fetch blip mitigation ─────────────────────────────
+// Background: 2026-06-16 15:30 [Send] Error: fetch failed silenced customer
+// Cause: Node 22 native fetch (undici) socket pool stale connection · transient
+// Fix: 3 retries · exp backoff · 8sec timeout · gate on transient errors only
+async function fetchWithRetry(url, opts = {}, attempts = 3, baseDelay = 500) {
+  const TRANSIENT_RE = /fetch failed|socket hang up|ECONNRESET|ETIMEDOUT|UND_ERR_SOCKET|UND_ERR_CONNECT_TIMEOUT|ENOTFOUND|EAI_AGAIN/i;
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (i > 0) {
+        console.log(`[fetchRetry] succeeded on attempt ${i + 1}/${attempts}`);
+      }
+      return res;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      lastErr = err;
+      const isTransient = TRANSIENT_RE.test(err.message || "") || err.name === "AbortError";
+      if (!isTransient || i === attempts - 1) {
+        if (i > 0) {
+          console.error(`[fetchRetry] gave up after ${attempts} attempts: ${err.message}`);
+        }
+        throw err;
+      }
+      const delay = baseDelay * Math.pow(2, i);  // 500ms · 1000ms · 2000ms
+      console.warn(`[fetchRetry] attempt ${i + 1}/${attempts} failed: ${err.message} · retry in ${delay}ms`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastErr;
+}
+
 // ─── FB profile cache ──────────────────────────────────────────────────────
 const profileCache = new Map();
 async function getSenderName(senderId) {
@@ -215,7 +250,7 @@ async function getSenderName(senderId) {
   if (!FB_PAGE_ACCESS_TOKEN) return "";
   try {
     const url = `https://graph.facebook.com/v19.0/${senderId}?fields=name,first_name,last_name&access_token=${FB_PAGE_ACCESS_TOKEN}`;
-    const res = await fetch(url);
+    const res = await fetchWithRetry(url);
     if (!res.ok) return "";
     const data = await res.json();
     const name = data.name || `${data.first_name || ""} ${data.last_name || ""}`.trim();
@@ -232,7 +267,7 @@ async function sendFbMessage(psid, text) {
   if (!FB_PAGE_ACCESS_TOKEN || !psid || !text) return null;
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -281,7 +316,7 @@ async function sendFbImage(psid, imageUrl) {
 
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -313,7 +348,7 @@ async function sendFbImage(psid, imageUrl) {
 async function sendFbImageUrlOnly(psid, imageUrl) {
   try {
     const url = `https://graph.facebook.com/v19.0/me/messages?access_token=${FB_PAGE_ACCESS_TOKEN}`;
-    const res = await fetch(url, {
+    const res = await fetchWithRetry(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
