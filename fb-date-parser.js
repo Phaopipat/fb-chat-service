@@ -24,7 +24,27 @@ const THAI_MONTHS = {
   'พ.ย.': 11, 'พฤศจิกายน': 11, 'พฤศจิกา': 11,
   'ธ.ค.': 12, 'ธันวาคม': 12, 'ธันวา': 12,
 };
-const MONTH_ALTS = Object.keys(THAI_MONTHS).sort((a, b) => b.length - a.length); // longest first
+const EN_MONTHS = {
+  'January': 1, 'Jan': 1,
+  'February': 2, 'Feb': 2,
+  'March': 3, 'Mar': 3,
+  'April': 4, 'Apr': 4,
+  'May': 5,
+  'June': 6, 'Jun': 6,
+  'July': 7, 'Jul': 7,
+  'August': 8, 'Aug': 8,
+  'September': 9, 'Sept': 9, 'Sep': 9,
+  'October': 10, 'Oct': 10,
+  'November': 11, 'Nov': 11,
+  'December': 12, 'Dec': 12,
+};
+
+// V98 — Combined month map for unified lookup (TH + EN)
+const ALL_MONTHS = { ...THAI_MONTHS, ...EN_MONTHS };
+const MONTH_LOOKUP = Object.fromEntries(
+  Object.entries(ALL_MONTHS).flatMap(([key, value]) => [[key, value], [key.toLowerCase(), value]])
+);
+const MONTH_ALTS = Object.keys(ALL_MONTHS).sort((a, b) => b.length - a.length); // longest first
 
 // Bangkok today
 function todayBKK() {
@@ -52,6 +72,7 @@ function inferYear(month, optHintYear) {
 }
 
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function monthNum(s) { return MONTH_LOOKUP[String(s || '').toLowerCase()]; }
 
 /**
  * Parse Thai date range from natural-language text.
@@ -98,7 +119,7 @@ function parseThaiDateRange(text) {
   if (m1) {
     const d1 = parseInt(m1[1], 10);
     const d2 = parseInt(m1[2], 10);
-    const month = THAI_MONTHS[m1[3]];
+    const month = monthNum(m1[3]);
     const year = inferYear(month, m1[4] ? parseInt(m1[4], 10) : null);
     if (d1 >= 1 && d1 <= 31 && d2 >= 1 && d2 <= 31 && d2 > d1) {
       return {
@@ -111,15 +132,15 @@ function parseThaiDateRange(text) {
 
   // Pattern 2: cross-month range "DD MONTH - DD MONTH"
   const rangeCrossMonthRe = new RegExp(
-    `(\\d{1,2})\\s*(${monthAlt})\\s*[-–]\\s*(\\d{1,2})\\s*(${monthAlt})\\s*(\\d{4})?`,
+    `(\\d{1,2})\\s*(${monthAlt})\\s*(?:[-–]|to|until|check\\s*out)\\s*(\\d{1,2})\\s*(${monthAlt})\\s*(\\d{4})?`,
     'i'
   );
   const m2 = t.match(rangeCrossMonthRe);
   if (m2) {
     const d1 = parseInt(m2[1], 10);
-    const month1 = THAI_MONTHS[m2[2]];
+    const month1 = monthNum(m2[2]);
     const d2 = parseInt(m2[3], 10);
-    const month2 = THAI_MONTHS[m2[4]];
+    const month2 = monthNum(m2[4]);
     const baseYear = inferYear(month1, m2[5] ? parseInt(m2[5], 10) : null);
     const checkInIso = fmt(baseYear, month1, d1);
     const yearOut = month2 < month1 ? baseYear + 1 : baseYear;
@@ -132,7 +153,7 @@ function parseThaiDateRange(text) {
   const m3 = t.match(singleRe);
   if (m3) {
     const day = parseInt(m3[1], 10);
-    const month = THAI_MONTHS[m3[2]];
+    const month = monthNum(m3[2]);
     const year = inferYear(month, m3[3] ? parseInt(m3[3], 10) : null);
     if (day >= 1 && day <= 31) {
       const checkIn = fmt(year, month, day);
