@@ -459,9 +459,12 @@ async function checkBayAvailability(auth, bay, checkInStr, checkOutStr) {
   };
 }
 
-// V100b · Scan ±60 days for alternative ranges of a specific room type
+// V100b · Scan ±N days for alternative ranges of a specific room type
 // Clamped: never before today. Returns top 3 by proximity.
-async function findAlternativeDates(auth, roomType, originalCheckIn, nights, windowDays = 60) {
+// V100d · windowDays reduced 60→30 to mitigate Sheets API quota stampede
+//         during cache warm-up (60 parallel room checks × 4 tabs = 240 reads
+//         when cache cold · hit Google 60 reads/min/user limit)
+async function findAlternativeDates(auth, roomType, originalCheckIn, nights, windowDays = 30) {
   if (!roomType || !originalCheckIn || !nights) return [];
 
   const today = new Date();
