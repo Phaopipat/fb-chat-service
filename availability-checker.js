@@ -75,24 +75,106 @@ function getRoomLocation(roomCode) {
   return null;
 }
 
-// V100a · Existing 12 rooms - SAME LIST, BUT cell positions now header-aligned
-// (V100b will expand to 60 rooms · this commit keeps customer-facing pool small)
-const SELECTED_ROOMS = {
-  // Pearl Bay Home — V100a OFFSET FIX (was reading -1 column · now header-aligned)
-  R21: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },  // was col 2 → now col 3
-  R31: { bay: 'อ่าวมุก', label: 'Family Villa อ่าวมุก' },  // was col 12 → now col 13
-  R33: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },  // was col 14 → now col 15
-  R34: { bay: 'อ่าวมุก', label: 'Beach Chalet อ่าวมุก' },  // was col 15 → now col 16
-  // Big Bay Thai — unchanged (was already correct)
-  T5:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T6:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T7:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T8:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T9:  { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T10: { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T11: { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
-  T12: { bay: 'อ่าวใหญ่', label: 'Thai Style อ่าวใหญ่' },
+// ─── V100b · Full pax + label metadata for all 60 rooms ──────────────────────
+// Used by SELECTED_ROOMS (export) and waterfall reply formatter
+// pax = max sleeping capacity per "Koh Taluu (selected room).xlsx" reference
+const ROOM_INFO = {
+  // ─── อ่าวมุก Pearl Bay · Beach Chalet 1-3 (R10-R18) ───
+  R10: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R11: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R12: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R13: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R14: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R15: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R16: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R17: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+  R18: { bay: 'อ่าวมุก', type: 'beach_chalet', label: 'Beach Chalet (Air)', pax: 2 },
+
+  // ─── อ่าวมุก · Pearl Bay Home (R20-R34) ───
+  R20: { bay: 'อ่าวมุก', type: 'family_villa', label: 'Family Thai Style Villa', pax: 3 },
+  R21: { bay: 'อ่าวมุก', type: 'family_villa', label: 'Family Thai Style Villa', pax: 1 },
+  R22: { bay: 'อ่าวมุก', type: 'two_story', label: 'Two-Story House (Top)', pax: 2 },
+  R23: { bay: 'อ่าวมุก', type: 'two_story', label: 'Two-Story House (Bottom)', pax: 2 },
+  R24: { bay: 'อ่าวมุก', type: 'biggest', label: 'Biggest Room', pax: 3 },
+  R25: { bay: 'อ่าวมุก', type: 'biggest', label: 'Biggest Room', pax: 3 },
+  R26: { bay: 'อ่าวมุก', type: 'single', label: 'Single Room', pax: 2 },
+  R27: { bay: 'อ่าวมุก', type: 'single_beach', label: 'Single Room (Beach Front)', pax: 2 },
+  R28: { bay: 'อ่าวมุก', type: 'four_br', label: '4BR House (Bottom)', pax: 2 },
+  R29: { bay: 'อ่าวมุก', type: 'four_br', label: '4BR House (Bottom)', pax: 2 },
+  R30: { bay: 'อ่าวมุก', type: 'four_br', label: '4BR House (Top)', pax: 2 },
+  R31: { bay: 'อ่าวมุก', type: 'four_br', label: '4BR House (Top)', pax: 1 },
+  R32: { bay: 'อ่าวมุก', type: 'two_story_b', label: '2-Story (Bottom)', pax: 2 },
+  R33: { bay: 'อ่าวมุก', type: 'two_story_b', label: '2-Story (Top)', pax: 1 },
+  R34: { bay: 'อ่าวมุก', type: 'two_story_b', label: '2-Story (Top)', pax: 1 },
+
+  // ─── อ่าวใหญ่ Big Bay · Manila Deluxe Chalet (D1-D16) ───
+  D1: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D2: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D3: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D4: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D5: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D6: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D7: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D8: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D9: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D10: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D11: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D12: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D13: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D14: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 3 },
+  D15: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+  D16: { bay: 'อ่าวใหญ่', type: 'manila_deluxe', label: 'Manila Deluxe Chalet', pax: 2 },
+
+  // ─── อ่าวใหญ่ · Honeymoon Ocean Front (D17-D18) ───
+  D17: { bay: 'อ่าวใหญ่', type: 'honeymoon', label: 'Honeymoon Ocean Front', pax: 2 },
+  D18: { bay: 'อ่าวใหญ่', type: 'honeymoon', label: 'Honeymoon Ocean Front', pax: 2 },
+
+  // ─── อ่าวใหญ่ · Thai Style (T1-T18) ───
+  T1: { bay: 'อ่าวใหญ่', type: 'thai_family', label: 'Thai Style Family Villa', pax: 2 },
+  T2: { bay: 'อ่าวใหญ่', type: 'thai_family', label: 'Thai Style Family Villa', pax: 2 },
+  T3: { bay: 'อ่าวใหญ่', type: 'thai_family', label: 'Thai Style Family Villa', pax: 2 },
+  T4: { bay: 'อ่าวใหญ่', type: 'thai_family', label: 'Thai Style Family Villa', pax: 2 },
+  T5: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T6: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T7: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T8: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T9: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T10: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T11: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T12: { bay: 'อ่าวใหญ่', type: 'thai_single', label: 'Thai Style Single Room (Share)', pax: 1 },
+  T13: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio', pax: 2 },
+  T14: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio', pax: 2 },
+  T15: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio (Connect)', pax: 2 },
+  T16: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio', pax: 3 },
+  T17: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio', pax: 2 },
+  T18: { bay: 'อ่าวใหญ่', type: 'thai_studio', label: 'Thai Style Studio', pax: 2 },
 };
+
+// V100b · Type label map for customer-facing replies
+const TYPE_LABELS = {
+  manila_deluxe: 'Manila Deluxe Chalet',
+  honeymoon: 'Honeymoon Ocean Front',
+  thai_family: 'Thai Style Family Villa',
+  thai_single: 'Thai Style Single Room (Share)',
+  thai_studio: 'Thai Style Studio',
+  beach_chalet: 'Beach Chalet (Air)',
+  family_villa: 'Family Thai Style Villa',
+  two_story: 'Two-Story House',
+  biggest: 'Biggest Room',
+  single: 'Single Room',
+  single_beach: 'Single Room (Beach Front)',
+  four_br: '4BR House',
+  two_story_b: '2-Story House',
+};
+
+function labelForType(type) {
+  return TYPE_LABELS[type] || 'ห้อง';
+}
+
+// V100b · Bot now reads all 60 rooms (V100a kept it at 12 for safety transition)
+// Customer-facing scope: all selected rooms in Excel · Manila Deluxe + Honeymoon
+// no longer escalate to admin (V99 scope shrunk · they're answered from D-tabs).
+const SELECTED_ROOMS = ROOM_INFO;
 
 // ─── Caches (module-level, survive across requests) ────────────────────────────
 // Key: spreadsheet name → { id, ts }
@@ -361,6 +443,69 @@ async function checkBayAvailability(auth, bay, checkInStr, checkOutStr) {
   };
 }
 
+// V100b · Scan ±60 days for alternative ranges of a specific room type
+// Clamped: never before today. Returns top 3 by proximity.
+async function findAlternativeDates(auth, roomType, originalCheckIn, nights, windowDays = 60) {
+  if (!roomType || !originalCheckIn || !nights) return [];
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const original = new Date(originalCheckIn + 'T00:00:00');
+  if (Number.isNaN(original.getTime())) return [];
+
+  const scanStart = new Date(Math.max(today.getTime(), original.getTime() - windowDays * 86_400_000));
+  const scanEnd = new Date(original.getTime() + windowDays * 86_400_000);
+  const roomCodes = Object.entries(ROOM_INFO)
+    .filter(([, info]) => info.type === roomType)
+    .map(([code]) => code);
+  if (!roomCodes.length) return [];
+
+  const candidates = [];
+  for (let d = new Date(scanStart); d <= scanEnd; d.setDate(d.getDate() + 1)) {
+    const checkIn = new Date(d);
+    const checkInStr = checkIn.toISOString().slice(0, 10);
+    if (checkInStr === originalCheckIn) continue;
+    candidates.push({
+      checkIn,
+      checkInStr,
+      proximity: Math.abs(checkIn.getTime() - original.getTime()),
+    });
+  }
+  candidates.sort((a, b) => a.proximity - b.proximity);
+
+  const ranges = [];
+  for (const candidate of candidates) {
+    const checkOut = new Date(candidate.checkIn);
+    checkOut.setDate(checkOut.getDate() + nights);
+    const checkOutStr = checkOut.toISOString().slice(0, 10);
+
+    try {
+      const result = await checkBayAvailability(auth, 'any', candidate.checkInStr, checkOutStr);
+      const typeAvailable = roomCodes.filter(code => {
+        const bay = ROOM_INFO[code].bay;
+        const bayResult = (result.bays || {})[bay];
+        return bayResult && (bayResult.available || []).includes(code);
+      }).length;
+
+      if (typeAvailable > 0) {
+        ranges.push({
+          checkIn: candidate.checkInStr,
+          checkOut: checkOutStr,
+          available: typeAvailable,
+          proximity: candidate.proximity,
+        });
+      }
+    } catch (_) {
+      continue;
+    }
+
+    if (ranges.length >= 5) break;
+  }
+
+  ranges.sort((a, b) => a.proximity - b.proximity);
+  return ranges.slice(0, 3);
+}
+
 // ─── Validate date inputs (server-side guard) ─────────────────────────────────
 function validateDates(checkIn, checkOut) {
   const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -401,5 +546,10 @@ module.exports = {
   ROOM_TAB_MAP,
   SELECTED_ROOMS,
   getRoomLocation,
+  // V100b exports
+  ROOM_INFO,
+  TYPE_LABELS,
+  labelForType,
+  findAlternativeDates,
   MAX_BOOKING_DAYS,
 };

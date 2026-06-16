@@ -37,26 +37,155 @@ const {
   classifyMessage: _classifyLPMsgFB,
   saveLeadProfile: _saveLPFB,
 } = require("./lead-profile");  // FB_STEP2_LEAD_PROFILE_WIRED
-// FB_AVAILABILITY_WIRED
-const { checkBayAvailability: _checkBayAvailFB, validateDates: _validateDatesFB, SELECTED_ROOMS: _SELECTED_ROOMS_FB } = require("./availability-checker");
+// FB_AVAILABILITY_WIRED + V100b · Full Excel coverage waterfall
+const {
+  checkBayAvailability: _checkBayAvailFB,
+  validateDates: _validateDatesFB,
+  SELECTED_ROOMS: _SELECTED_ROOMS_FB,
+  ROOM_INFO: _ROOM_INFO_FB,
+  findAlternativeDates: _findAlternativeDatesFB,
+  labelForType: _labelForTypeFB,
+} = require("./availability-checker");
 const { parseThaiDateRange: _parseThaiDateRangeFB } = require("./fb-date-parser");
 
+// V100b · V99 scope shrunk to Pool Villa only · Manila Deluxe + Honeymoon + D-series
+// now answered by V100b waterfall (read directly from D-tabs + Big Bay Thai cols V-W)
 function _isOutOfScopeRoomTypeFB(text) {
   if (!text || typeof text !== "string") return null;
-  if (/manila\s*deluxe|มะนิลา[\s·]*ดีลักซ์|มะนิลาเดอลุกซ์|ดีลักซ์.*ชาเลต์|deluxe\s*chalet/i.test(text)) {
-    return { type: "manila_deluxe", label: "Manila Deluxe Chalet" };
-  }
-  if (/honeymoon|ฮันนีมูน|hm\s*ocean|ocean\s*front\s*honey/i.test(text)) {
-    return { type: "honeymoon", label: "Honeymoon Ocean Front" };
-  }
   if (/pool\s*villa|พูล.*วิลล่า|พูลวิลล่า/i.test(text)) {
     return { type: "pool_villa", label: "Pool Villa" };
   }
-  if (/\b[Dd](?:1[0-8]|[1-9])\b/.test(text)) {
-    return { type: "d_series", label: "ห้อง D-series" };
+  return null;
+}
+
+// V100b FB · room type detection (mirror of LINE detectRequestedRoomType)
+function _detectRequestedRoomTypeFB(text) {
+  if (!text || typeof text !== 'string') return null;
+  if (/manila\s*deluxe|มะนิลา[\s·]*ดีลักซ์|ดีลักซ์.*ชาเลต์|deluxe\s*chalet/i.test(text)) return 'manila_deluxe';
+  if (/honeymoon|ฮันนีมูน|ocean\s*front\s*honey/i.test(text)) return 'honeymoon';
+  if (/thai\s*family|family\s*villa|เรือนไทย.*แฟมิลี่/i.test(text)) return 'thai_family';
+  if (/thai\s*style.*studio|studio.*thai|สตูดิโอ.*ไทย/i.test(text)) return 'thai_studio';
+  if (/thai\s*style|เรือนไทย/i.test(text)) return 'thai_single';
+  if (/studio|สตูดิโอ/i.test(text)) return 'thai_studio';
+  if (/beach\s*chalet|บีช.*ชาเลต์|ชาเลต์.*หาด/i.test(text)) return 'beach_chalet';
+  if (/biggest|ห้องใหญ่ที่สุด/i.test(text)) return 'biggest';
+  if (/2[\s-]?story|2[\s-]?ชั้น|two[\s-]?story|สองชั้น/i.test(text)) return 'two_story';
+  if (/4\s*bedroom|4\s*br|4\s*ห้องนอน/i.test(text)) return 'four_br';
+  const codeMatch = text.match(/\b([DTRdtr])(\d{1,2})\b/);
+  if (codeMatch) {
+    const code = codeMatch[1].toUpperCase() + codeMatch[2];
+    if (_ROOM_INFO_FB[code]) return _ROOM_INFO_FB[code].type;
   }
   return null;
 }
+
+function _v100bExtractPaxFB(text) {
+  if (!text) return null;
+  const m = text.match(/(\d+)\s*คน/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+const _V100B_FB_TH_MONTH_ABBR = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+                                 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+
+function _v100bFormatDateRangeThFB({ checkIn, checkOut }) {
+  const a = new Date(checkIn + 'T00:00:00');
+  const b = new Date(checkOut + 'T00:00:00');
+  return `${a.getDate()} ${_V100B_FB_TH_MONTH_ABBR[a.getMonth()]} - ${b.getDate()} ${_V100B_FB_TH_MONTH_ABBR[b.getMonth()]}`;
+}
+
+function _v100bBayEmojiFB(bay) {
+  return bay === 'อ่าวมุก' ? '🛖' : '🏠';
+}
+
+// V100b FB · 3-level waterfall reply formatter
+async function _formatV100bReplyFB({ auth, requestedRoomType, dates, pax, primaryResult }) {
+  const availableOfType = [];
+  for (const [, bayData] of Object.entries(primaryResult.bays || {})) {
+    for (const code of (bayData.available || [])) {
+      if (_ROOM_INFO_FB[code] && (!requestedRoomType || _ROOM_INFO_FB[code].type === requestedRoomType)) {
+        availableOfType.push(code);
+      }
+    }
+  }
+
+  const typeLabel = requestedRoomType ? _labelForTypeFB(requestedRoomType) : 'ห้องพัก';
+
+  // Level 0
+  if (availableOfType.length > 0) {
+    const byBay = {};
+    for (const code of availableOfType) {
+      const bay = _ROOM_INFO_FB[code].bay;
+      if (!byBay[bay]) byBay[bay] = [];
+      byBay[bay].push(code);
+    }
+    let reply = `${typeLabel} ช่วง ${_v100bFormatDateRangeThFB(dates)} ว่าง ${availableOfType.length} ห้องครับ ✨\n`;
+    for (const [bay, codes] of Object.entries(byBay)) {
+      reply += `${_v100bBayEmojiFB(bay)} ${bay}: ${codes.slice(0, 5).join(', ')}${codes.length > 5 ? ` (+ ${codes.length - 5} ห้อง)` : ''}\n`;
+    }
+    reply += `\nสนใจห้องไหนครับ?`;
+    return { replyText: reply, mode: 'l0_available' };
+  }
+
+  // Level 1: same dates · other types
+  const otherTypes = {};
+  for (const [bay, bayData] of Object.entries(primaryResult.bays || {})) {
+    for (const code of (bayData.available || [])) {
+      const info = _ROOM_INFO_FB[code];
+      if (!info) continue;
+      if (requestedRoomType && info.type === requestedRoomType) continue;
+      const key = info.type;
+      if (!otherTypes[key]) otherTypes[key] = { type: info.type, bay, label: info.label, codes: [], maxPax: 0 };
+      otherTypes[key].codes.push(code);
+      otherTypes[key].maxPax = Math.max(otherTypes[key].maxPax, info.pax);
+    }
+  }
+
+  // Level 2: same type · alt dates
+  let altDates = [];
+  if (requestedRoomType) {
+    const nights = Math.round((new Date(dates.checkOut) - new Date(dates.checkIn)) / 86_400_000);
+    try {
+      altDates = await _findAlternativeDatesFB(auth, requestedRoomType, dates.checkIn, nights, 60);
+    } catch (err) {
+      console.warn('[V100b-FB] findAlternativeDates failed:', err.message);
+    }
+  }
+
+  const otherTypesList = Object.values(otherTypes);
+  if (otherTypesList.length === 0 && altDates.length === 0) {
+    return {
+      replyText: `${typeLabel} ช่วง ${_v100bFormatDateRangeThFB(dates)} เต็มหมดครับ 🙏 และไม่มีห้องอื่นว่างในช่วงนี้ เจ้าหน้าที่จะติดต่อกลับเพื่อแนะนำทางเลือกอื่นให้นะครับ`,
+      mode: 'l3_escalation',
+    };
+  }
+
+  let reply = `${typeLabel} ช่วง ${_v100bFormatDateRangeThFB(dates)} เต็มหมดแล้วครับ 🙏\n`;
+
+  if (otherTypesList.length > 0) {
+    reply += `\n📅 ช่วงเดียวกัน ห้องอื่นที่ว่าง:\n`;
+    otherTypesList.slice(0, 4).forEach(g => {
+      reply += `${_v100bBayEmojiFB(g.bay)} ${g.label} (${g.codes.slice(0, 3).join(', ')}${g.codes.length > 3 ? ' ...' : ''}) — พักได้ ${g.maxPax} คน/ห้อง\n`;
+    });
+    if (pax) {
+      const maxFitting = Math.max(...otherTypesList.flatMap(g => g.codes.map(c => _ROOM_INFO_FB[c].pax)));
+      if (maxFitting < pax) {
+        reply += `   ↪️ จำนวนคน ${pax} ปรับลดต่อห้องได้มั้ยครับ?\n`;
+      }
+    }
+  }
+
+  if (altDates.length > 0) {
+    reply += `\n📅 หรือ ${typeLabel} ช่วงอื่นว่าง:\n`;
+    altDates.forEach(r => {
+      reply += `· ${_v100bFormatDateRangeThFB({ checkIn: r.checkIn, checkOut: r.checkOut })} (ว่าง ${r.available} ห้อง)\n`;
+    });
+  }
+
+  reply += `\nสนใจช่วงไหน/ห้องไหนครับ?`;
+  return { replyText: reply, mode: 'l1l2_combined' };
+}
+// ─── end V100b FB helpers ───────────────────────────────────────────────────
 
 // Format availability result as customer-facing reply
 function _formatAvailabilityReplyFB(parsed, result) {
@@ -1106,6 +1235,28 @@ async function handleMessagingEvent(event) {
               }]));
               console.log(`[AVAIL-FB] result · totalAvailable=${_result.totalAvailable} hasUnknown=${_result.hasUnknown}`);
               console.log(`[AVAIL-FB] bays detail: ${JSON.stringify(_bayDebug)}`);
+
+              // V100b · Try waterfall reply if room type detected OR all rooms full
+              const _v100bRoomType = _detectRequestedRoomTypeFB(text);
+              if (_v100bRoomType || _result.totalAvailable === 0) {
+                try {
+                  const _v100bResult = await _formatV100bReplyFB({
+                    auth: _auth,
+                    requestedRoomType: _v100bRoomType,
+                    dates: { checkIn: _parsed.checkIn, checkOut: _parsed.checkOut },
+                    pax: _v100bExtractPaxFB(text),
+                    primaryResult: _result,
+                  });
+                  if (_v100bResult && _v100bResult.replyText) {
+                    console.log(`[V100b-FB] waterfall mode=${_v100bResult.mode}`);
+                    await sendAndLog(senderId, _v100bResult.replyText, JSON.stringify({ topic: `bot:v100b:${_v100bResult.mode}` }));
+                    return;
+                  }
+                } catch (_v100bErr) {
+                  console.warn('[V100b-FB] formatter failed · falling through:', _v100bErr.message);
+                }
+              }
+
               const _availReply = _formatAvailabilityReplyFB(_parsed, _result);
               if (_availReply) {
                 await sendAndLog(senderId, _availReply);
