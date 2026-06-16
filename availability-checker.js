@@ -13,7 +13,7 @@ const THAI_MONTH_ABBR = [
 ];
 
 const MAX_BOOKING_DAYS = 270; // 9 months · covers typical advance booking window (raised from 90 days · AREÉ Stage A 2026-05-24 evidence: customer "23 ต.ค." 5 months out got too_far → escalated → lost booking)
-const CACHE_TTL_MS = 60_000; // 1 minute
+const CACHE_TTL_MS = 300_000; // V99 · 5 min · quota relief (was 60s · hit limit on concurrent checks)
 
 // ─── Selected rooms from Excel analysis (F=1) — Phase 2 scope ────────────────
 // Only these rooms are surfaced to customers via the bot

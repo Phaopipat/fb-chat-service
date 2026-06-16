@@ -41,6 +41,23 @@ const {
 const { checkBayAvailability: _checkBayAvailFB, validateDates: _validateDatesFB, SELECTED_ROOMS: _SELECTED_ROOMS_FB } = require("./availability-checker");
 const { parseThaiDateRange: _parseThaiDateRangeFB } = require("./fb-date-parser");
 
+function _isOutOfScopeRoomTypeFB(text) {
+  if (!text || typeof text !== "string") return null;
+  if (/manila\s*deluxe|มะนิลา[\s·]*ดีลักซ์|มะนิลาเดอลุกซ์|ดีลักซ์.*ชาเลต์|deluxe\s*chalet/i.test(text)) {
+    return { type: "manila_deluxe", label: "Manila Deluxe Chalet" };
+  }
+  if (/honeymoon|ฮันนีมูน|hm\s*ocean|ocean\s*front\s*honey/i.test(text)) {
+    return { type: "honeymoon", label: "Honeymoon Ocean Front" };
+  }
+  if (/pool\s*villa|พูล.*วิลล่า|พูลวิลล่า/i.test(text)) {
+    return { type: "pool_villa", label: "Pool Villa" };
+  }
+  if (/\b[Dd](?:1[0-8]|[1-9])\b/.test(text)) {
+    return { type: "d_series", label: "ห้อง D-series" };
+  }
+  return null;
+}
+
 // Format availability result as customer-facing reply
 function _formatAvailabilityReplyFB(parsed, result) {
   // FB_AVAIL_V2_SERVER_HOTFIX + FB_AVAIL_V3_UNKNOWN: parsed dates + smart unknown handling
@@ -1011,6 +1028,23 @@ async function handleMessagingEvent(event) {
       }
     }
     // ── end FB_STEP3_SHADOW_WIRED ──
+
+    // V99 FB · Out-of-scope room intercept (Manila Deluxe / Honeymoon / Pool Villa / D-series)
+    const _v99Scope = messageType === "text" ? _isOutOfScopeRoomTypeFB(text) : null;
+    if (_v99Scope) {
+      console.log(`[V99-FB] out-of-scope room: ${_v99Scope.type} (${_v99Scope.label})`);
+      const _v99Reply = `เรื่อง${_v99Scope.label} เจ้าหน้าที่จะตอบกลับให้นะครับ 🙏 ระหว่างนี้บอทช่วยตอบเรื่องห้องอื่นๆ (Thai Style / Family Villa / Beach Chalet) ได้ครับ`;
+      await sendAndLog(senderId, _v99Reply, JSON.stringify({ topic: `bot:v99_scope:room_${_v99Scope.type}` }));
+      if (typeof notifySensitiveKeyword === "function") {
+        notifySensitiveKeyword({
+          senderName,
+          psid: senderId,
+          customerMessage: text,
+          reason: `v99_out_of_scope:${_v99Scope.type}`,
+        }).catch(() => {});
+      }
+      return;
+    }
 
     // ── FB_AVAILABILITY_WIRED + FB_AVAIL_V2_SERVER_HOTFIX — availability check before AI gen ──
     if (process.env.AVAILABILITY_CHECK_ENABLED !== 'false' && messageType === 'text') {
