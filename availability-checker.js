@@ -443,12 +443,53 @@ async function checkOneRoom(auth, roomCode, checkInStr, checkOutStr) {
   return { available: true };
 }
 
+// V100f · Sequential pre-fetch · warm cache for all unique (sheet, tab) combos
+// before Promise.all rooms. Reduces cache stampede from 60 parallel API calls
+// per tab → 1 sequential call per unique tab. ~5x fewer API calls overall.
+async function _prefetchTabsForRooms(auth, roomCodes, checkInStr, checkOutStr) {
+  // 1. Determine unique sheets (months) needed
+  const checkIn = new Date(checkInStr + 'T00:00:00');
+  const checkOut = checkOutStr
+    ? new Date(checkOutStr + 'T00:00:00')
+    : new Date(checkInStr + 'T00:00:00');
+  if (!checkOutStr) checkOut.setDate(checkOut.getDate() + 1);
+  const months = getMonthsInRange(checkIn, checkOut);
+
+  // 2. Determine unique tabs needed (from ROOM_TAB_MAP via getRoomLocation)
+  const tabs = new Set();
+  for (const code of roomCodes) {
+    const loc = getRoomLocation(code);
+    if (loc) tabs.add(loc.tabTitle);
+  }
+
+  // 3. For each (sheet, tab) combo: sequentially warm cache
+  let warmCount = 0;
+  for (const { year, month } of months) {
+    const sheetName = getSheetName(new Date(year, month, 1));
+    let spreadsheetId;
+    try {
+      spreadsheetId = await findSpreadsheetId(auth, sheetName);
+    } catch (_) { continue; }
+    if (!spreadsheetId) continue;
+    for (const tabTitle of tabs) {
+      try {
+        await getTabData(auth, spreadsheetId, tabTitle);
+        warmCount++;
+      } catch (_) { /* skip · room loop will retry/handle errors */ }
+    }
+  }
+  if (warmCount > 0) console.log(`[V100f] prefetch warmed ${warmCount} tab(s) for ${months.length} month(s)`);
+}
+
 // ─── Check all rooms for a bay, return structured summary ────────────────────
 // bay: 'อ่าวมุก' | 'อ่าวใหญ่' | 'any'
 async function checkBayAvailability(auth, bay, checkInStr, checkOutStr) {
   const roomCodes = Object.entries(SELECTED_ROOMS)
     .filter(([, info]) => bay === 'any' || info.bay === bay)
     .map(([code]) => code);
+
+  // V100f · pre-fetch sequentially before Promise.all (avoid cache stampede)
+  await _prefetchTabsForRooms(auth, roomCodes, checkInStr, checkOutStr);
 
   const results = await Promise.all(
     roomCodes.map(async (roomCode) => {
