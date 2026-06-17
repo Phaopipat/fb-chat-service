@@ -1193,11 +1193,13 @@ async function handleMessagingEvent(event) {
     }
     // ── end FB_STEP3_SHADOW_WIRED ──
 
-    // V99 FB · Out-of-scope room intercept (Manila Deluxe / Honeymoon / Pool Villa / D-series)
+    // V99 FB · Out-of-scope room intercept (Pool Villa only · V100b removed Manila/Honeymoon/D-series)
     const _v99Scope = messageType === "text" ? _isOutOfScopeRoomTypeFB(text) : null;
     if (_v99Scope) {
       console.log(`[V99-FB] out-of-scope room: ${_v99Scope.type} (${_v99Scope.label})`);
-      const _v99Reply = `เรื่อง${_v99Scope.label} เจ้าหน้าที่จะตอบกลับให้นะครับ 🙏 ระหว่างนี้บอทช่วยตอบเรื่องห้องอื่นๆ (Thai Style / Family Villa / Beach Chalet) ได้ครับ`;
+      // V100g (2026-06-17): Phao confirmed resort has NO Pool Villa
+      // Reply honestly + recommend actual room types instead of admin escalation
+      const _v99Reply = `รีสอร์ทเราไม่มี ${_v99Scope.label} ครับ 🙏 ที่นี่มีห้องประเภทอื่น · สนใจดูห้องไหนครับ?\n🛖 อ่าวมุก: Family Villa · Beach Chalet\n🏠 อ่าวใหญ่: Manila Deluxe · Honeymoon Ocean Front · Thai Style`;
       await sendAndLog(senderId, _v99Reply, JSON.stringify({ topic: `bot:v99_scope:room_${_v99Scope.type}` }));
       if (typeof notifySensitiveKeyword === "function") {
         notifySensitiveKeyword({
