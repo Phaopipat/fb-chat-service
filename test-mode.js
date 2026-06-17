@@ -1,11 +1,16 @@
 /**
- * fb-chat-service test-mode.js · Stage 3 (v1.3.0)
+ * fb-chat-service test-mode.js · Stage 3 (v1.3.0) · V102fb-stage-flag (2026-06-17)
  *
  * Sheet-based allowlist for FB bot replies.
  * Tab: "TestMode" in iB Chatlog Sheet (same Sheet as Messages tab)
  * Schema: A=psid B=displayName C=mode D=addedAt E=notes
  *
- * Logic:
+ * Behavior (mirror of LINE design):
+ *   TEST_MODE_ENABLED env var (default: "true" · safer than LINE which defaults false)
+ *   - "true" or unset → whitelist mode (Stage A · bot only replies to PSIDs in TestMode tab)
+ *   - "false"         → open mode (Stage B/C · bot replies to ALL PSIDs)
+ *
+ * Within whitelist mode:
  *   - mode === "active"          → bot replies to this psid
  *   - mode === "inactive" / null → bot silent for this psid
  *   - Sheet unreachable          → fallback to ECHO_ENABLED_PSIDS env var
@@ -13,6 +18,12 @@
  * Cache: 60s TTL · refresh on cache miss
  * Admin workflow: edit Sheet directly → effect within ≤60s · no redeploy needed
  */
+
+// ─── V102fb-stage-flag · TEST_MODE_ENABLED env switch ────────────────────────
+// Default 'true' for FB (safer than LINE 'false') · whitelist is current behavior
+function isTestModeEnabled() {
+  return (process.env.TEST_MODE_ENABLED ?? 'true').toLowerCase() !== 'false';
+}
 
 const CACHE_TTL_MS = 60 * 1000;
 
@@ -85,6 +96,9 @@ async function isAllowed({
 }) {
   if (!psid) return false;
 
+  // V102fb-stage-flag: production mode bypasses whitelist (Stage B/C)
+  if (!isTestModeEnabled()) return true;
+
   const cacheAge = Date.now() - cache.fetchedAt;
   const cacheStale = cacheAge > CACHE_TTL_MS;
 
@@ -131,4 +145,5 @@ module.exports = {
   refreshCache,
   invalidateCache,
   getCacheStatus,
+  isTestModeEnabled, // V102fb-stage-flag · for /runtime-status reporting
 };
