@@ -28,6 +28,8 @@ const { generateReply } = require("./ai-reply");
 const observability = require("./observability");  // FB_OBSERVABILITY_WIRED
 const { getLeadProfileStats } = require("./lead-profile");  // FB_OPS_ENDPOINTS_WIRED
 const { getStats: getSheetQueueStats } = require("./sheets-helper");  // FB_OPS_ENDPOINTS_WIRED
+// Phase 1 · shared-core shadow — the unified LINE brain, run read-only against FB (FB_CORE_SHADOW=true)
+const { handleAutoReply: coreHandleAutoReply } = require("./core/ai-reply");
 const { tryLateEmailCapture } = require("./late-email-handler");  // FB_LATE_EMAIL_WIRED
 const { classifyIntent: _classifyIntentShadowFB } = require("./intent-router");  // FB_STEP3_SHADOW_WIRED
 const { logShadowDecision: _logShadowFB } = require("./intent-shadow-log");  // FB_STEP3_SHADOW_WIRED
@@ -392,6 +394,30 @@ async function getSenderName(senderId) {
 }
 
 // ─── Send API ──────────────────────────────────────────────────────────────
+// ─── Phase 1 · shared-core shadow helpers ─────────────────────────────────
+// Run the unified brain (core handleAutoReply) with NO-OP sends + log its decision, to
+// compare against the live FB generateReply path. Fire-and-forget; never throws into live.
+// NOTE: this still calls Claude (costs credits) → enable FB_CORE_SHADOW only while testing.
+function _coreShadowAdapter(psid) {
+  const noop = (label) => async () => { console.log(`[CORE-SHADOW] would ${label} → ${psid.slice(0, 8)}`); return true; };
+  return { platform: "fb-shadow", reply: noop("reply"), pushText: noop("pushText"),
+           pushImage: noop("pushImage"), pushLink: noop("pushLink"), pushToGroup: noop("pushToGroup") };
+}
+async function runCoreShadow({ sheets, auth, senderId, senderName, text }) {
+  const t0 = Date.now();
+  try {
+    const res = await coreHandleAutoReply({
+      sheets, auth, sheetId: GOOGLE_SHEET_ID, apiKey: ANTHROPIC_API_KEY,
+      lineToken: "", userId: senderId, displayName: senderName,
+      msgType: "text", msgText: text, replyToken: null, topic: "",
+      adapter: _coreShadowAdapter(senderId),
+    });
+    console.log(`[CORE-SHADOW] psid=${senderId.slice(0, 8)} mode=${res && res.mode} replied=${res && res.replied} ms=${Date.now() - t0} | reply="${((res && res.replyText) || "").replace(/\s+/g, " ").slice(0, 180)}"`);
+  } catch (err) {
+    console.warn(`[CORE-SHADOW] error (non-blocking) ms=${Date.now() - t0}:`, err.message);
+  }
+}
+
 async function sendFbMessage(psid, text) {
   if (!FB_PAGE_ACCESS_TOKEN || !psid || !text) return null;
   try {
@@ -950,6 +976,12 @@ async function handleMessagingEvent(event) {
   if (!isWithinActiveHours()) {
     console.log(`[V97] outsideActiveHours · psid=${senderId.substring(0, 8)}`);
     return;
+  }
+
+  // ─── Phase 1 · shared-core SHADOW (env FB_CORE_SHADOW=true · read-only, NO sends) ──
+  // Fire-and-forget: log what the unified brain WOULD reply, to compare vs live generateReply.
+  if (process.env.FB_CORE_SHADOW === "true" && messageType === "text" && text) {
+    runCoreShadow({ sheets, auth, senderId, senderName, text });
   }
 
   // ─── Stage 6.7: Clear customer's waiting timer (they sent a new inbound) ──
