@@ -6707,7 +6707,7 @@ async function handleAutoReply({
   // บัตร → push a payment-link request to the office group (Ice makes the link manually; auto-relay
   // back to the customer = Stage 3b, deferred). Falls back to admin escalation if env unset.
   let _attachBankCard = null; // Stage 3 · prepend the bank-transfer card image to the reply
-  if (!replyText && process.env.AVAIL_ORCH_GATE === 'true' && msgType === 'text' && msgText && isAwaitingPayment(userId)) {
+  if (!replyText && process.env.AVAIL_ORCH_GATE === 'true' && msgType === 'text' && msgText && (isAwaitingPayment(userId) || (getAwaitingPaymentProof(userId) && /เปลี่ยน|switch/i.test(msgText)))) {
     try {
       const _isTransfer = /โอน|transfer|ธนาคาร|\bbank|พร้อมเพย์|promptpay|1️⃣|ข้อ\s*1|แบบ\s*1|อย่างแรก/i.test(msgText);
       const _isCard = /บัตร|เครดิต|credit|\bcard|2️⃣|ข้อ\s*2|แบบ\s*2|ลิงก์|link/i.test(msgText);
