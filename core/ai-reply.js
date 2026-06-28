@@ -4956,7 +4956,7 @@ function _parseContact(text) {
 
 // Stage 2 · forward the booking request + contact to the office LINE group (Phao chose Auto-push).
 async function _pushToBookingGroup(lineToken, text) {
-  const groupId = process.env.BOOKING_SUMMARY_GROUP_ID || '';
+  const groupId = process.env.BOOKING_SUMMARY_GROUP_ID || process.env.LINE_GROUP_ID || '';
   if (!lineToken || !groupId || !text) return false;
   // Kill-switch for testing: set BOOKING_GROUP_PUSH=off in Railway env to stop spamming the real
   // office group while smoke-testing. Default (unset) = on. The customer still gets the bot reply.
