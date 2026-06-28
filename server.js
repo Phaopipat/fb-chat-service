@@ -418,6 +418,42 @@ async function runCoreShadow({ sheets, auth, senderId, senderName, text }) {
   }
 }
 
+// ─── Phase 1 · shared-core LIVE adapter ───────────────────────────────────
+// Real FB adapter: the core sends its reply THROUGH here (Send API) + logs to the sheet.
+// reply() translates the core's LINE-shaped message array → FB text/image sends.
+function _fbLiveAdapter(psid) {
+  const _emit = async (messages) => {
+    for (const m of (messages || [])) {
+      if (m && m.type === "text" && m.text) await sendAndLog(psid, m.text, JSON.stringify({ via: "core" }));
+      else if (m && m.type === "image") await sendFbImage(psid, m.originalContentUrl || m.previewImageUrl);
+    }
+    return true;
+  };
+  return {
+    platform: "fb",
+    reply: (_replyToken, messages) => _emit(messages),
+    pushText: (_uid, t) => sendAndLog(psid, t, JSON.stringify({ via: "core" })),
+    pushImage: async (_uid, imageUrl, caption, footer) => {
+      if (caption) await sendAndLog(psid, caption, JSON.stringify({ via: "core" }));
+      await sendFbImage(psid, imageUrl);
+      if (footer) await sendAndLog(psid, footer, JSON.stringify({ via: "core" }));
+      return true;
+    },
+    pushLink: (_uid, link) => sendAndLog(psid, link, JSON.stringify({ via: "core" })),
+  };
+}
+async function runCoreLive({ sheets, auth, senderId, senderName, text }) {
+  const res = await coreHandleAutoReply({
+    sheets, auth, sheetId: GOOGLE_SHEET_ID, apiKey: ANTHROPIC_API_KEY,
+    lineToken: process.env.LINE_PUSH_TOKEN || "",   // office-group push stays LINE (core calls it directly)
+    userId: senderId, displayName: senderName,
+    msgType: "text", msgText: text, replyToken: null, topic: "",
+    adapter: _fbLiveAdapter(senderId),
+  });
+  console.log(`[CORE-LIVE] psid=${senderId.slice(0, 8)} mode=${res && res.mode} replied=${res && res.replied}`);
+  return !!(res && res.replied);
+}
+
 async function sendFbMessage(psid, text) {
   if (!FB_PAGE_ACCESS_TOKEN || !psid || !text) return null;
   try {
@@ -1311,6 +1347,19 @@ async function handleMessagingEvent(event) {
     }
     // ── end FB_AVAILABILITY_WIRED ──
 
+    // ─── Phase 1 · shared-core LIVE (env FB_CORE_LIVE=true) ───────────────────
+    // Route the main reply through the unified brain (core handleAutoReply) with a REAL FB
+    // adapter (Send API). If it replies, we're done. Off by default → unchanged generateReply
+    // path. try/catch → any core error falls back to generateReply, so FB never goes silent.
+    if (process.env.FB_CORE_LIVE === "true" && messageType === "text" && text) {
+      try {
+        const _coreHandled = await runCoreLive({ sheets, auth, senderId, senderName, text });
+        if (_coreHandled) return;
+      } catch (err) {
+        console.error("[CORE-LIVE] error → fallback to generateReply:", err.message);
+      }
+    }
+
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
       senderId,
@@ -1413,6 +1462,7 @@ app.listen(PORT, () => {
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING");
   console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "(default LINE)");
   console.log("  FB_CORE_SHADOW:         ", process.env.FB_CORE_SHADOW === "true" ? "✅ ON (unified-core shadow active)" : "⚪ off");
+  console.log("  FB_CORE_LIVE:           ", process.env.FB_CORE_LIVE === "true" ? "🟢 ON (core DRIVES main reply)" : "⚪ off (generateReply)");
   console.log(
     "  SLIPOK BRANCHES:        ",
     slipokBranches.length > 0
