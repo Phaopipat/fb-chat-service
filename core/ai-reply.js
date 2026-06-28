@@ -4489,9 +4489,9 @@ const V82_STAFF_NAME_LEAK_PATTERNS = [
   },
   {
     name: 'ownerName',
-    pattern: /คุณ\s*ปรีดา\s*เจริญพักตร์|ปรีดา\s*เจริญพักตร์|เผ่าพิพัฒน์\s*เจริญพักตร์|Phaopipat/gi,
+    pattern: /เผ่าพิพัฒน์\s*เจริญพักตร์|Phaopipat/gi,
     replacement: 'เจ้าหน้าที่',
-    description: 'V82 Q8.1 · owner/personal names must be generic',
+    description: 'V82 Q8.1 · operator name must be generic (founder ปรีดา เจริญพักตร์ is brand-public → allowed)',
   },
 ];
 
