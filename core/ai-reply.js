@@ -34,6 +34,7 @@ const { parseStay } = require('./stay-date'); // WU5 · parse stay (checkIn/chec
 // on LINE → both helpers fall back to sheetId → byte-identical LINE behavior.
 const _kbSheetIdFor = (sid) => process.env.KB_SHEET_ID || sid;
 const _pricingSheetIdFor = (sid) => process.env.PRICING_SHEET_ID || process.env.KB_SHEET_ID || sid;
+const { upsertChannel, lookupChannel } = require('./channel-registry'); // R1 · platform registry (CustomerChannel)
 
 // ─── V61 PACKAGE_ACTIVITIES canonical source ────────────────────────────────
 // Single source of truth for what's INCLUDED in package vs EXTRA (paid).
@@ -6690,6 +6691,10 @@ async function handleAutoReply({
       if (_ct && (_ct.phone || _ct.email)) { // phone (Thai) OR email = contact signal (foreigners have no Thai phone)
         rememberContact(userId, _ct); // Stage 2→3 · carry contact for the payment step + card-link matching
         _rememberBookingRecord(userId); // Stage 4b · snapshot ground-truth booking to audit Ice's confirmation later
+        // R1 · platform registry: durably remember which channel (LINE/FB) this contact is on, so the
+        // office-group relay (card link / confirmation) can later route to the right channel. Fire-and-forget.
+        upsertChannel({ sheets, sheetId, phone: _ct.phone, email: _ct.email, platform: _ad.platform, sendHandle: userId, displayName })
+          .catch((e) => console.warn('[channel-registry] upsert err:', e.message));
         const _grp = _buildBookingGroupPush({ userId, name: _ct.name, phone: _ct.phone, email: _ct.email });
         if (_grp) await _pushToBookingGroup(lineToken, _grp);
         clearAwaitingContact(userId);

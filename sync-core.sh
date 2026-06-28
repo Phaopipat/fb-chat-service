@@ -7,7 +7,7 @@ SRC="${1:-../webhook-kohtalu}"
 DST="$(cd "$(dirname "$0")" && pwd)/core"
 FILES=(ai-reply.js availability-checker.js availability-orchestrator.js customer-history.js
   image-lint.js image-map.js knowledge-base.js lead-profile.js pricing-loader.js
-  room-resolver.js stay-date.js test-mode.js)
+  room-resolver.js stay-date.js test-mode.js channel-registry.js)
 mkdir -p "$DST"
 for f in "${FILES[@]}"; do cp "$SRC/$f" "$DST/$f"; echo "  synced $f"; done
 # image-map.js scans public/images via fs.readdirSync to build its URL maps. The image BYTES are
