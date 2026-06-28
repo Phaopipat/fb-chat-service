@@ -421,10 +421,23 @@ async function runCoreShadow({ sheets, auth, senderId, senderName, text }) {
 // ─── Phase 1 · shared-core LIVE adapter ───────────────────────────────────
 // Real FB adapter: the core sends its reply THROUGH here (Send API) + logs to the sheet.
 // reply() translates the core's LINE-shaped message array → FB text/image sends.
+// FB caps text at ~2000 chars/message (the core splits at 4500 for LINE's 5000) → re-split here
+// so long replies (e.g. the conservation KB story) aren't truncated mid-word.
+function _fbSplit(s, max = 1900) {
+  const out = []; let r = String(s == null ? "" : s);
+  while (r.length > max) {
+    let cut = r.lastIndexOf("\n", max); if (cut < max * 0.5) cut = r.lastIndexOf(" ", max); if (cut <= 0) cut = max;
+    out.push(r.slice(0, cut).trim()); r = r.slice(cut).trim();
+  }
+  if (r) out.push(r);
+  return out;
+}
 function _fbLiveAdapter(psid) {
+  const META = JSON.stringify({ via: "core" });
+  const _sendText = async (t) => { for (const part of _fbSplit(t)) await sendAndLog(psid, part, META); return true; };
   const _emit = async (messages) => {
     for (const m of (messages || [])) {
-      if (m && m.type === "text" && m.text) await sendAndLog(psid, m.text, JSON.stringify({ via: "core" }));
+      if (m && m.type === "text" && m.text) await _sendText(m.text);
       else if (m && m.type === "image") await sendFbImage(psid, m.originalContentUrl || m.previewImageUrl);
     }
     return true;
@@ -432,22 +445,23 @@ function _fbLiveAdapter(psid) {
   return {
     platform: "fb",
     reply: (_replyToken, messages) => _emit(messages),
-    pushText: (_uid, t) => sendAndLog(psid, t, JSON.stringify({ via: "core" })),
+    pushText: (_uid, t) => _sendText(t),
     pushImage: async (_uid, imageUrl, caption, footer) => {
-      if (caption) await sendAndLog(psid, caption, JSON.stringify({ via: "core" }));
+      if (caption) await _sendText(caption);
       await sendFbImage(psid, imageUrl);
-      if (footer) await sendAndLog(psid, footer, JSON.stringify({ via: "core" }));
+      if (footer) await _sendText(footer);
       return true;
     },
-    pushLink: (_uid, link) => sendAndLog(psid, link, JSON.stringify({ via: "core" })),
+    pushLink: (_uid, link) => _sendText(link),
   };
 }
-async function runCoreLive({ sheets, auth, senderId, senderName, text }) {
+async function runCoreLive({ sheets, auth, senderId, senderName, text, leadProfile }) {
   const res = await coreHandleAutoReply({
     sheets, auth, sheetId: GOOGLE_SHEET_ID, apiKey: ANTHROPIC_API_KEY,
     lineToken: process.env.LINE_PUSH_TOKEN || "",   // office-group push stays LINE (core calls it directly)
     userId: senderId, displayName: senderName,
     msgType: "text", msgText: text, replyToken: null, topic: "",
+    leadProfile,                                    // cross-turn booking context (carry)
     adapter: _fbLiveAdapter(senderId),
   });
   console.log(`[CORE-LIVE] psid=${senderId.slice(0, 8)} mode=${res && res.mode} replied=${res && res.replied}`);
@@ -1261,6 +1275,31 @@ async function handleMessagingEvent(event) {
     }
     // ── end FB_STEP3_SHADOW_WIRED ──
 
+    // ─── Phase 1 · shared-core LIVE (env FB_CORE_LIVE=true) — core owns ALL text ──
+    // Route EVERYTHING (V99 / availability / booking / images / free-form) through the ONE unified
+    // brain so multi-turn booking state is carried by a single brain (needs AVAIL_ORCH_GATE=true +
+    // Replicas=1 in fb env). Pass the freshly-classified leadProfile for cross-turn context.
+    // try/catch → any core error falls through to fb's own gates + generateReply (never silent).
+    if (process.env.FB_CORE_LIVE === "true" && messageType === "text" && text) {
+      try {
+        const _coreHandled = await runCoreLive({ sheets, auth, senderId, senderName, text, leadProfile: _leadProfileFB });
+        if (_coreHandled) {
+          if (_isLPEnabledFB() && _leadProfileFB) {
+            const _nowIso = new Date().toISOString();
+            _saveLPFB(senderId, {
+              updated_at: _nowIso,
+              inbound_count:   (_leadProfileFB.inbound_count   || 0) + 1,
+              bot_reply_count: (_leadProfileFB.bot_reply_count || 0) + 1,
+              ...(!_leadProfileFB.first_contact ? { first_contact: _nowIso } : {}),
+            }).catch((e) => console.warn("[LP-FB] core-live save error:", e.message));
+          }
+          return;
+        }
+      } catch (err) {
+        console.error("[CORE-LIVE] error → fallback to fb gates/generateReply:", err.message);
+      }
+    }
+
     // V99 FB · Out-of-scope room intercept (Pool Villa only · V100b removed Manila/Honeymoon/D-series)
     const _v99Scope = messageType === "text" ? _isOutOfScopeRoomTypeFB(text) : null;
     if (_v99Scope) {
@@ -1346,19 +1385,6 @@ async function handleMessagingEvent(event) {
       }
     }
     // ── end FB_AVAILABILITY_WIRED ──
-
-    // ─── Phase 1 · shared-core LIVE (env FB_CORE_LIVE=true) ───────────────────
-    // Route the main reply through the unified brain (core handleAutoReply) with a REAL FB
-    // adapter (Send API). If it replies, we're done. Off by default → unchanged generateReply
-    // path. try/catch → any core error falls back to generateReply, so FB never goes silent.
-    if (process.env.FB_CORE_LIVE === "true" && messageType === "text" && text) {
-      try {
-        const _coreHandled = await runCoreLive({ sheets, auth, senderId, senderName, text });
-        if (_coreHandled) return;
-      } catch (err) {
-        console.error("[CORE-LIVE] error → fallback to generateReply:", err.message);
-      }
-    }
 
     const reply = await generateReply({
       apiKey: ANTHROPIC_API_KEY,
