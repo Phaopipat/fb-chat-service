@@ -1412,6 +1412,7 @@ app.listen(PORT, () => {
   );
   console.log("  ANTHROPIC_API_KEY:      ", ANTHROPIC_API_KEY ? "✅ set" : "❌ MISSING");
   console.log("  IMAGE_HOST:             ", process.env.IMAGE_HOST || "(default LINE)");
+  console.log("  FB_CORE_SHADOW:         ", process.env.FB_CORE_SHADOW === "true" ? "✅ ON (unified-core shadow active)" : "⚪ off");
   console.log(
     "  SLIPOK BRANCHES:        ",
     slipokBranches.length > 0
