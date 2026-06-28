@@ -28,6 +28,13 @@ const {
 const { getPricingBlock, getPricingCacheStats } = require('./pricing-loader');
 const { parseStay } = require('./stay-date'); // WU5 · parse stay (checkIn/checkOut/nights) for deterministic price facts
 
+// Phase 1 · shared-core: KB + pricing may live in a DIFFERENT sheet than availability.
+// fb-chat-service keeps the shared KnowledgeBase in KB_SHEET_ID + pricing in PRICING_SHEET_ID
+// (cross-Sheet read), while LINE keeps everything in the one sheetId. These env vars are unset
+// on LINE → both helpers fall back to sheetId → byte-identical LINE behavior.
+const _kbSheetIdFor = (sid) => process.env.KB_SHEET_ID || sid;
+const _pricingSheetIdFor = (sid) => process.env.PRICING_SHEET_ID || process.env.KB_SHEET_ID || sid;
+
 // ─── V61 PACKAGE_ACTIVITIES canonical source ────────────────────────────────
 // Single source of truth for what's INCLUDED in package vs EXTRA (paid).
 // Resolves F-E inconsistency from M A M_K A M O N team test 2026-05-28
@@ -2653,7 +2660,7 @@ async function shouldBotReply({ sheets, sheetId, userId, msgType, msgText, topic
   const _v110WouldSkipCancel = leadProfile?.stage && ['booking', 'won'].includes(leadProfile.stage);
   if (isCancelContext(msgText) && (process.env.KB_LOOKUP_ENABLED ?? 'true') !== 'false' && !_v110WouldSkipCancel) {
     try {
-      const _allKbs = await _readKBForV41_3({ sheets, sheetId });
+      const _allKbs = await _readKBForV41_3({ sheets, sheetId: _kbSheetIdFor(sheetId) });
       const _cancelKB = _allKbs.find(e => e.id === 'KB-20260615-005');
       if (_cancelKB) {
         console.log(`[V41.3] cancel context · force-load ${_cancelKB.id} · bypass Jaccard tie`);
@@ -2674,7 +2681,7 @@ async function shouldBotReply({ sheets, sheetId, userId, msgType, msgText, topic
   if ((process.env.KB_LOOKUP_ENABLED ?? 'true') !== 'false' && !skipKBForPrice) {
     const kbStart = Date.now();
     // V110 · thread leadProfile so KB precedence guard can skip on payment/cancel/modify intent + booking/won stage
-    const kbPromise = kbLookup({ sheets, sheetId, customerMessage: msgText, topic, apiKey, today: getTodayBKK(), profile: leadProfile });
+    const kbPromise = kbLookup({ sheets, sheetId: _kbSheetIdFor(sheetId), customerMessage: msgText, topic, apiKey, today: getTodayBKK(), profile: leadProfile });
     const kbTimeout = new Promise(resolve => setTimeout(() => resolve(null), 3500));
     const kbHit = await Promise.race([kbPromise, kbTimeout]);
     const kbMs = Date.now() - kbStart;
@@ -6471,7 +6478,7 @@ async function handleAutoReply({
   }
 
   // Phase 2.5: load pricing from Sheet (10-min cache) — null = use hardcoded fallback
-  const pricingBlock = await getPricingBlock({ sheets, sheetId, userId });
+  const pricingBlock = await getPricingBlock({ sheets, sheetId: _pricingSheetIdFor(sheetId), userId });
   const pricingIntent = parsePricingIntent(msgText);
   const nightsPricingHint = buildNightsPricingHint(pricingIntent);
   if (nightsPricingHint) {
@@ -6789,7 +6796,7 @@ async function handleAutoReply({
       }
       decision.mode = `kb:${decision.kbHit.id}`;
     }
-    kbIncrementUsage({ sheets, sheetId, kbId: decision.kbHit.id })
+    kbIncrementUsage({ sheets, sheetId: _kbSheetIdFor(sheetId), kbId: decision.kbHit.id })
       .catch(err => console.warn('[ai-reply] kbIncrementUsage error:', err.message));
   } else if (decision.mode === 'kb_hint') {
     // Confidence 0.65-0.85: inject KB answer as AI context — AI generates natural reply
