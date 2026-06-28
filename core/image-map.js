@@ -505,14 +505,14 @@ function matchImages(text) {
   // ห้องน้ำ (bathroom→null per V58c) and ห้องอาหาร (restaurant, matched earlier) so food/
   // turtle/activity image asks still fall through to null and escalate honestly.
   const _roomCtx = /ห้อง(?!น้ำ|อาหาร)|ที่พัก|บ้านพัก|บ้านปูน|บ้านไม้|\broom\b|accommodation/i.test(t);
-  if (_roomCtx && /อ่าวใหญ่|big\s*bay/i.test(t) && !/อ่าวมุก|pearl\s*bay/i.test(t)) {
+  if (/อ่าวใหญ่|big\s*bay/i.test(t) && !/อ่าวมุก|pearl\s*bay/i.test(t)) {
     const images = [
       ...lookupByRoomType('thai_style', 'interior', 2),
       ...lookupByRoomType('manila_deluxe', 'interior', 2),
     ].filter(Boolean);
     if (images.length) return { images: images.slice(0, 5), caption: 'รูปห้องพักฝั่งอ่าวใหญ่ครับ 🏠\n• Thai Style Ocean Villa\n• Manila Deluxe Chalet\n— อยากดูแบบไหนเพิ่ม บอกได้เลยครับ' };
   }
-  if (_roomCtx && /อ่าวมุก|pearl\s*bay/i.test(t) && !/อ่าวใหญ่|big\s*bay/i.test(t)) {
+  if (/อ่าวมุก|pearl\s*bay/i.test(t) && !/อ่าวใหญ่|big\s*bay/i.test(t)) {
     const images = [
       ...lookupByRoomType('beach_chalet', 'interior', 2),
       ...lookupByRoomType('family_villa_amuk', 'interior', 1),
